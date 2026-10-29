@@ -1,6 +1,7 @@
 # Codex Pocket
 
 [![Android and UI checks](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml/badge.svg)](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml)
+[![Releases](https://img.shields.io/github/v/release/Tombears/codex-pocket?include_prereleases)](https://github.com/Tombears/codex-pocket/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 面向安卓的独立 Codex SSH 客户端。手机通过 SSH 启动 Linux 服务器上的 `codex app-server`，以聊天形式发送任务、接收流式消息和处理审批。非 OpenAI 官方应用。
@@ -32,9 +33,11 @@
 
 ## 安装与使用
 
-支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。可以自行构建 APK，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-debug-and-reports`，解压后安装 APK。下载构建产物可能需要登录 GitHub。
+支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；当前版本为 [v0.1.0 公开测试版](https://github.com/Tombears/codex-pocket/releases/tag/v0.1.0)，安装文件为 `CodexPocket-0.1.0-debug.apk`，同页提供 `SHA256SUMS.txt` 校验文件。
 
-本地交付的测试包名为 `CodexPocket-0.1.0-debug.apk`。当前是 debug 签名测试版，未发布应用商店；GitHub Actions 每次构建可能生成不同的 debug 签名，覆盖安装需使用相同签名。更新前请注意手机本地记录的保留。
+也可以自行构建，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-debug-and-reports`。下载 Actions 构建产物可能需要登录 GitHub。
+
+当前是 debug 签名测试版，未发布应用商店。Releases 中的 APK 使用 GitHub Actions 构建的 debug 签名，与此前本地交付的测试包签名不同，不能直接覆盖安装该旧包。卸载会清除手机本地连接和聊天记录，请在操作前确认；服务器上的 Codex 会话和文件仍会保留。后续覆盖安装也需要使用相同签名，GitHub Actions 每次构建的 debug 签名可能不同。
 
 首次使用前，在你的 Linux 服务器中以将来 SSH 登录的**同一用户**完成准备：
 

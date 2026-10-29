@@ -1,12 +1,14 @@
 plugins { id 'com.android.application' }
+def appVersionCode = providers.gradleProperty('versionCode').getOrElse('3').toInteger()
+def appVersionName = providers.gradleProperty('versionName').getOrElse('0.1.2')
 android {
     namespace 'dev.codexpocket'
     compileSdk 35
     buildToolsVersion '35.0.0'
     defaultConfig {
         applicationId 'dev.codexpocket'; minSdk 26; targetSdk 34
-        versionCode (project.findProperty('versionCode') ?: '3').toInteger()
-        versionName project.findProperty('versionName') ?: '0.1.2'
+        versionCode = appVersionCode
+        versionName = appVersionName
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17; coreLibraryDesugaringEnabled true }

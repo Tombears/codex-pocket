@@ -76,6 +76,7 @@ final class Store {
             }
         }
         h.put("id",id);h.put("port",input.optInt("port",22));h.put("pathDefaultsVersion",1);
+        h.put("host",SshAddress.normalize(h.optString("host")));
         if(h.optString("name").isBlank()||h.optString("host").isBlank()||h.optString("user").isBlank())throw new Exception("请填写名称、地址和用户名");
         if(h.optInt("port")<1||h.optInt("port")>65535)throw new Exception("端口应为 1–65535");
         if(!Set.of("password","key").contains(h.optString("auth")))throw new Exception("请选择认证方式");

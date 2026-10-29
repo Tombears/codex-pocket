@@ -8,6 +8,7 @@ import java.security.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
+import java.net.*;
 
 final class CodexEngine {
     final String hostId;
@@ -16,6 +17,7 @@ final class CodexEngine {
     private Session ssh;
     private ChannelExec channel;
     private volatile Rpc rpc;
+    private volatile Socket pendingSocket;
     private final Set<String> loaded=ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String,Pending> approvals=new ConcurrentHashMap<>();
     private volatile CompletableFuture<Boolean> trust;
@@ -32,7 +34,7 @@ final class CodexEngine {
     record Pending(Object id,String method,JSONObject params,String chatId){}
     CodexEngine(CodexService owner,String hostId){this.owner=owner;this.hostId=hostId;this.store=owner.store;}
     private void phase(long attempt,String label)throws IOException{
-        if(!connection.stage(attempt,label))throw new IOException("连接已取消或超时");owner.update();
+        if(!connection.stage(attempt,label))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,label);owner.update();
     }
     private void requireActive(long attempt)throws IOException{if(!connection.active(attempt))throw new IOException("连接已取消或超时");}
     void connect()throws Exception{
@@ -43,9 +45,11 @@ final class CodexEngine {
             close();closing=false;stderr.clear();runtimeCwd="";runtimeCodex="";attempt=connection.begin();owner.update();
             final long token=attempt;
             watchdog=DEADLINES.scheduleAtFixedRate(()->{
-                if(connection.expire(token)){closing=true;owner.trustPrompts.remove(hostId);owner.update();cleanupTransport();}
+                if(connection.expire(token)){closing=true;owner.log("ERROR","connection/"+hostId,connection.snapshot().error());owner.trustPrompts.remove(hostId);owner.update();cleanupTransport();}
             },1,1,TimeUnit.SECONDS);
             JSONObject h=store.host(hostId);if(h==null)throw new IOException("虚拟机不存在");
+            String address=SshAddress.normalize(h.optString("host"));
+            owner.log("INFO","connection/"+hostId,"Start "+address+":"+h.optInt("port",22)+" auth="+h.optString("auth"));
             phase(attempt,"加载 SSH 密钥");
             // Use the full BC provider for Ed25519/modern OpenSSH keys on Android.
             synchronized(CodexEngine.class){
@@ -85,7 +89,28 @@ final class CodexEngine {
                 byte[] pass=h.optString("passphrase").isEmpty()?null:h.optString("passphrase").getBytes(StandardCharsets.UTF_8);
                 try{jsch.addIdentity("device-key",key,null,pass);}finally{Arrays.fill(key,(byte)0);if(pass!=null)Arrays.fill(pass,(byte)0);}
             }
-            ssh=jsch.getSession(h.optString("user"),h.optString("host"),h.optInt("port",22));
+            ssh=jsch.getSession(h.optString("user"),address,h.optInt("port",22));
+            ssh.setConfig("kex","curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256");
+            ssh.setSocketFactory(new SocketFactory(){
+                public Socket createSocket(String name,int port)throws IOException{
+                    phase(token,"解析服务器地址");InetSocketAddress target=new InetSocketAddress(name,port);requireActive(token);
+                    phase(token,"连接服务器 TCP 端口");Socket socket=new Socket();pendingSocket=socket;
+                    try{socket.connect(target,connection.remainingMillis(token));requireActive(token);phase(token,"等待 SSH 服务响应");return socket;}catch(IOException e){socket.close();throw e;}
+                }
+                public InputStream getInputStream(Socket socket)throws IOException{return socket.getInputStream();}
+                public OutputStream getOutputStream(Socket socket)throws IOException{return socket.getOutputStream();}
+            });
+            ssh.setLogger(new Logger(){
+                public boolean isEnabled(int level){return level>=Logger.INFO;}
+                public void log(int level,String text){
+                    try{
+                        if(text.startsWith("Remote version string:"))phase(token,"协商 SSH 加密");
+                        else if(text.startsWith("SSH_MSG_NEWKEYS received"))phase(token,"验证 SSH 身份");
+                        else if(text.startsWith("Authentications that can continue:"))phase(token,"执行 SSH 认证");
+                        if(text.startsWith("kex: algorithm:")||text.startsWith("Authentication succeeded"))owner.log("INFO","ssh/"+hostId,text);
+                    }catch(IOException ignored){}
+                }
+            });
             ssh.setConfig("StrictHostKeyChecking","yes");
             ssh.setConfig("PreferredAuthentications",h.optString("auth").equals("key")?"publickey":"password");
             if(h.optString("auth").equals("password"))ssh.setPassword(h.optString("password"));
@@ -99,17 +124,18 @@ final class CodexEngine {
             channel.setErrStream(stderr);
             channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
             rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.1.1")),30);
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.1.2")),30);
             requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
             for(String line:stderr.text().split("\n")){
                 if(line.startsWith("__CP_CWD__="))runtimeCwd=line.substring(11);
                 if(line.startsWith("__CP_BIN__="))runtimeCodex=line.substring(11);
             }
-            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.update();
+            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,"Codex handshake complete");owner.update();
         }catch(Exception|LinkageError e){
             String label=connection.snapshot().phase();
             String message=(label.isEmpty()?"":label+"失败：")+errorMessage(e);
+            owner.log("ERROR","connection/"+hostId,message);
             if(connection.current(attempt)){closing=true;connection.fail(attempt,message);owner.update();cleanupTransport();}
             throw new IOException(message,e);
         }finally{
@@ -269,7 +295,7 @@ final class CodexEngine {
     private void cleanupTransport(){
         owner.trustPrompts.remove(hostId);
         closing=true;CompletableFuture<Boolean> f=trust;if(f!=null)f.complete(false);trust=null;
-        Rpc r=rpc;rpc=null;if(r!=null)r.close();if(channel!=null)channel.disconnect();if(ssh!=null)ssh.disconnect();channel=null;ssh=null;loaded.clear();
+        Rpc r=rpc;rpc=null;if(r!=null)r.close();Socket socket=pendingSocket;pendingSocket=null;if(socket!=null)try{socket.close();}catch(IOException ignored){}if(channel!=null)channel.disconnect();if(ssh!=null)ssh.disconnect();channel=null;ssh=null;loaded.clear();
         String id=busyChat;busyChat="";turnId="";resolveAll(null);
         if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null&&c.optString("status").equals("working"))store.put(c,"status","interrupted");}
     }

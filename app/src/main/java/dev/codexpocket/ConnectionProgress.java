@@ -17,6 +17,7 @@ final class ConnectionProgress {
     }
     synchronized boolean active(long id){return id==generation&&status.equals("connecting");}
     synchronized boolean current(long id){return id==generation;}
+    synchronized int remainingMillis(long id){return active(id)?(int)Math.max(1,Math.min(30000,(deadline-clock.getAsLong()+999999)/1000000)):1;}
     synchronized boolean online(long id){if(!active(id))return false;status="online";phase="";return true;}
     synchronized boolean fail(long id,String message){
         if(id!=generation||(!status.equals("connecting")&&!status.equals("online")))return false;

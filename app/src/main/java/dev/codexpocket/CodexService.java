@@ -3,6 +3,8 @@ package dev.codexpocket;
 import android.app.*;
 import android.content.*;
 import android.os.*;
+import android.net.Uri;
+import java.nio.charset.StandardCharsets;
 import org.json.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -16,6 +18,7 @@ public final class CodexService extends Service {
     private final ExecutorService workers=Executors.newCachedThreadPool();
     private final Handler main=new Handler(Looper.getMainLooper());
     Store store;
+    DiagnosticLog diagnostics;
     String initError;
     private volatile Listener listener;
     private boolean updatePending;
@@ -25,6 +28,8 @@ public final class CodexService extends Service {
         manager.createNotificationChannel(new NotificationChannel("connection","SSH 与 Codex 连接",NotificationManager.IMPORTANCE_LOW));
         manager.createNotificationChannel(new NotificationChannel("attention","Codex 需要确认",NotificationManager.IMPORTANCE_DEFAULT));
         startForeground(1,notification("服务器连接将在后台保持",false));
+        try{diagnostics=new DiagnosticLog(this);log("INFO","app","service started");}catch(Exception e){android.util.Log.w("CodexPocket","Diagnostics unavailable");}
+        main.postDelayed(new Runnable(){public void run(){if(diagnostics!=null)try{diagnostics.prune();}catch(Exception ignored){}main.postDelayed(this,60*60*1000L);}},60*60*1000L);
         try{store=new Store(this);store.changed=this::update;}catch(Exception e){initError="无法读取本地加密数据，请勿清除应用数据；先保留安装并检查系统密钥库。";}
     }
     private Notification notification(String text,boolean attention){
@@ -32,6 +37,8 @@ public final class CodexService extends Service {
         return new Notification.Builder(this,attention?"attention":"connection").setSmallIcon(dev.codexpocket.R.drawable.ic_app).setContentTitle("Codex Pocket").setContentText(text).setContentIntent(open).setOngoing(!attention).setAutoCancel(attention).build();
     }
     void notifyAttention(){getSystemService(NotificationManager.class).notify(2,notification("任务正在等待你的回应",true));}
+    void log(String level,String tag,String message){if(diagnostics!=null)try{diagnostics.record(level,tag,message);}catch(Exception ignored){}}
+    void exportLogs(Uri uri){workers.submit(()->{try{if(diagnostics==null)throw new java.io.IOException("日志暂不可用");try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选文件");out.write(diagnostics.exportText().getBytes(StandardCharsets.UTF_8));}event(Json.obj("type","toast","message","已导出最近 24 小时日志"));}catch(Exception e){event(Json.obj("type","toast","message","日志导出失败："+e.getMessage()));}});}
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_NOT_STICKY;}
     @Override public IBinder onBind(Intent intent){return binder;}
     void listen(Listener l){listener=l;update();}
@@ -92,8 +99,8 @@ public final class CodexService extends Service {
                     default:throw new IllegalArgumentException("未知操作");
                 }
                 event(Json.obj("type","actionComplete","action",type,"chatId",chatId));update();
-            }catch(Exception|LinkageError e){event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
+            }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
         });
     }
-    @Override public void onDestroy(){for(CodexEngine e:engines.values())e.close();if(store!=null)store.flush();workers.shutdownNow();super.onDestroy();}
+    @Override public void onDestroy(){main.removeCallbacksAndMessages(null);for(CodexEngine e:engines.values())e.close();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
 }

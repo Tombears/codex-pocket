@@ -3,9 +3,24 @@ android {
     namespace 'dev.codexpocket'
     compileSdk 35
     buildToolsVersion '35.0.0'
-    defaultConfig { applicationId 'dev.codexpocket'; minSdk 26; targetSdk 34; versionCode 2; versionName '0.1.1' }
+    defaultConfig {
+        applicationId 'dev.codexpocket'; minSdk 26; targetSdk 34
+        versionCode (project.findProperty('versionCode') ?: '3').toInteger()
+        versionName project.findProperty('versionName') ?: '0.1.2'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17; coreLibraryDesugaringEnabled true }
-    buildTypes { release { minifyEnabled false } }
+    signingConfigs {
+        stableRelease {
+            def path = System.getenv('ANDROID_SIGNING_KEYSTORE_PATH')
+            if (path) storeFile file(path)
+            storePassword System.getenv('ANDROID_SIGNING_STORE_PASSWORD')
+            keyAlias System.getenv('ANDROID_SIGNING_KEY_ALIAS')
+            keyPassword System.getenv('ANDROID_SIGNING_KEY_PASSWORD')
+        }
+    }
+    buildTypes { release { minifyEnabled false; signingConfig signingConfigs.stableRelease } }
+    testBuildType 'release'
     packaging { resources.excludes += ['META-INF/versions/**', 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'] }
 }
 dependencies {
@@ -14,4 +29,6 @@ dependencies {
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
 }

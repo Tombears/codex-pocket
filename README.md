@@ -31,15 +31,18 @@
 - Android 前台服务维持连接并提示待审批事项。
 - 自动识别远程用户主目录与 Codex 安装路径；路径覆盖为可选高级设置。
 - SSH 到 Codex 握手的连接总超时为 30 秒，显示当前阶段，可取消；错误保留在连接设置中。
+- 设置中可导出最近 24 小时的调试日志，记录连接阶段和错误，不记录私钥、密码或聊天正文。
 - 密码、私钥和聊天记录统一使用 Android Keystore 生成的 AES-GCM 密钥加密保存；不进入网页初始化数据。关闭系统备份。
 
 ## 安装与使用
 
-支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.1.1 版支持自动识别路径和 30 秒连接总超时，同页提供 `SHA256SUMS.txt` 校验文件。
+支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.1.2 版使用固定签名，支持自动识别路径、30 秒连接总超时和日志导出，同页提供 `SHA256SUMS.txt` 校验文件。
 
 也可以自行构建，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-debug-and-reports`。下载 Actions 构建产物可能需要登录 GitHub。
 
-当前是 debug 签名测试版，未发布应用商店。Releases 中的 APK 使用 GitHub Actions 构建的 debug 签名，与此前本地交付的测试包签名不同，不能直接覆盖安装该旧包。卸载会清除手机本地连接和聊天记录，请在操作前确认；服务器上的 Codex 会话和文件仍会保留。后续覆盖安装也需要使用相同签名，GitHub Actions 每次构建的 debug 签名可能不同。
+从 **0.1.2** 起，Releases 的正式安装包使用固定签名，应用包名与本地加密存储标识保持一致。后续版本使用更高 versionCode，可直接覆盖安装，保留连接配置、保存的凭据和聊天记录。
+
+旧版 0.1.0 / 0.1.1 使用已丢失私钥的临时 debug 签名，无法直接覆盖迁移到固定签名版。这次需要卸载并重新配置，卸载会清空手机本地数据；服务器上的 Codex 会话和文件不受影响。之后请使用同一仓库 Releases 中的固定签名版本更新，不要混用自行构建的 debug 包。
 
 首次使用前，在你的 Linux 服务器中以将来 SSH 登录的**同一用户**完成准备：
 
@@ -66,6 +69,12 @@ codex login --device-auth
 > 查看当前项目结构，介绍如何启动，先不要修改文件。
 
 电脑上已有的 Codex 聊天可以在顶部虚拟机信息中选择「导入」，随后点击对应记录。聊天选项中的「刷新远程记录」会以服务器记录替换手机缓存中的消息。
+
+## 调试日志
+
+在「设置 → 导出调试日志」选择保存位置即可导出文本。应用仅保留最近 24 小时记录，并设置数量和单条长度上限；在启动、写入、导出以及运行期间定期清理过期数据。日志包含客户端/系统版本、目标地址、连接阶段、耗时线索及错误，不记录私钥、密码、验证码或聊天正文。导出的文件由用户自行管理，不属于应用自动清理范围。
+
+连接失败时，先确认地址和端口，再导出日志。`UnknownHostException` 表示地址格式或解析失败；TCP 端口连接超时、等待 SSH 响应、加密协商和认证会分别显示。不要向 Issue 上传私钥或密码。
 
 ## 使用边界
 
@@ -98,7 +107,7 @@ sdk.dir=你的AndroidSDK目录
 ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 ```
 
-Windows 使用 `gradlew.bat`。若需后续覆盖安装，请使用同一个签名密钥；源码压缩包不含私钥或签名文件。正式发布前应配置自己的 release 签名并进行真机联调。
+Windows 使用 `gradlew.bat`。自行构建 debug 包可以调试，但不能覆盖仓库固定签名的 release 包。构建 release 时需要通过环境变量提供 `ANDROID_SIGNING_KEYSTORE_PATH`、`ANDROID_SIGNING_STORE_PASSWORD`、`ANDROID_SIGNING_KEY_ALIAS`、`ANDROID_SIGNING_KEY_PASSWORD`。仓库与源码压缩包不包含签名私钥。维护者的 CI 从 GitHub Secrets 解密加载固定签名，构建后删除临时密钥文件；公开证书摘要在 `signing-certificate.sha256` 中。
 
 界面测试在 `tools/` 运行：
 
@@ -121,7 +130,7 @@ Linux CI 安装浏览器时使用 `npx playwright install --with-deps chromium`�
 
 ## 验证记录
 
-0.1.1 本地验证通过 13 项单元测试，包括原有 JSON-RPC 用例、固定 30 秒总超时、取消后旧回调隔离、UTF-8 错误缓存和自动路径迁移。浏览器以原生桥接替身验证了 14 类界面流程，新增连接阶段/取消、持久错误显示和无需填写路径的 root 连接表单。
+0.1.2 本地验证通过 17 项单元测试和 17 类界面流程，覆盖日志脱敏/24 小时策略、IP 校验、30 秒总超时、取消、自动路径、日志导出入口及原有聊天行为。CI 另提供 Android 模拟器测试：使用临时本地 SSH 服务验证 Android 原生连接引擎，并通过同签名 APK 的 `adb install -r` 覆盖安装检查配置、凭据、加密存储和聊天记录是否保留。模拟器测试不会使用真实服务器或用户私钥；实际执行结果见 Actions。
 
 Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标及本地界面必须启用 JavaScript；JavaScript 仅在受限本地资源域使用，远程消息均转义后渲染。
 
@@ -138,7 +147,7 @@ Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标�
 - [Bouncy Castle](https://www.bouncycastle.org/licence.html)：现代 SSH 密钥算法支持，Bouncy Castle 许可。
 - [Android desugar libraries](https://github.com/google/desugar_jdk_libs)：较旧 Android 的 Java API 支持，采用上游许可证。
 
-版本：0.1.1；日期：2026-10-29（Asia/Shanghai）。
+版本：0.1.2；日期：2026-10-29（Asia/Shanghai）。
 
 ## 开源许可
 

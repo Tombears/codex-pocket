@@ -46,7 +46,7 @@ function welcomeHTML(){
     ['terminal','排查运行问题','从日志和配置找到原因','检查当前项目的运行情况和错误日志，分析可能的问题，先给我排查结果。'],
     ['edit','开始一个新功能','把需求拆成可执行的步骤','阅读当前项目代码，帮我规划一个新功能。先了解项目，再问我具体需求。'],
     ['shield','检查最近改动','审查代码，发现潜在问题','检查当前目录的 Git 变更，指出潜在问题与风险，先不要修改或提交代码。']
-  ].map(([i,t,d,p])=>`<button class="suggestion" data-action="suggest" data-prompt="${esc(p)}">${icon(i)}<span><strong>${t}</strong><small>${d}</small></span><span class="suggest-arrow">↗</span></button>`).join('')}</div><div class="welcome-bottom"><span>${icon('shield')}凭据本地加密</span><span>${icon('server')}多虚拟机独立会话</span><span>${icon('chat')}随时继续聊天</span></div>`;
+  ].map(([i,t,d,p])=>`<button class="suggestion" data-action="suggest" data-prompt="${esc(p)}">${icon(i)}<span><strong>${t}</strong><small>${d}</small></span><span class="suggest-arrow">↗</span></button>`).join('')}</div>`;
 }
 function markdown(text){
   const codes=[];let s=esc(text).replace(/```([^\n]*)\n([\s\S]*?)```/g,(_,lang,body)=>{codes.push(`<pre><code>${body}</code></pre>`);return `\u0001${codes.length-1}\u0001`;});
@@ -112,7 +112,7 @@ function newChat(id=hostId){
   openDialog('newChat',`${head('新建聊天')}<form id="chat-form"><div class="dialog-body"><p class="dialog-description">选择虚拟机与工作目录，开始一段独立的 Codex 会话。</p><div class="field-grid"><label class="field full">虚拟机<select name="hostId" id="new-host">${state.hosts.map(x=>`<option value="${esc(x.id)}" ${x.id===h.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label class="field full">工作目录<input name="cwd" id="new-cwd" value="${esc(h.cwd||'')}" placeholder="自动使用服务器用户主目录" autocapitalize="off" spellcheck="false"></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary">创建聊天</button></div></form>`);
 }
 function settings(){
-  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.1.1 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。Android 系统可能回收后台连接，首版不保证断网后任务继续运行。重新连接后可恢复会话上下文。</p></div>`);
+  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-item"><div><strong>导出调试日志</strong><small>仅保留最近 24 小时，不记录私钥和聊天正文</small></div><button class="btn" data-action="exportLogs">导出</button></div><div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.1.2 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。Android 系统可能回收后台连接，首版不保证断网后任务继续运行。重新连接后可恢复会话上下文。</p></div>`);
 }
 function hostInfo(id=hostId){
   const h=state.hosts.find(h=>h.id===id);if(!h){editor();return;}const con=connection(id);
@@ -167,6 +167,7 @@ document.addEventListener('click',e=>{
     case 'selectChat':selectChat(id);break;
     case 'collapseHost':collapsed.has(id)?collapsed.delete(id):collapsed.add(id);renderSidebar();break;
     case 'settings':settings();break;
+    case 'exportLogs':native({type:'exportLogs'});break;
     case 'hostInfo':hostInfo(id||hostId);break;
     case 'closeDialog':closeDialog();break;
     case 'connect':case 'disconnect':native({type:a,hostId:id||hostId});if($('#dialog').open)closeDialog();if(a==='connect')toast('正在建立 SSH 与 Codex 连接…');break;
@@ -194,6 +195,8 @@ document.addEventListener('click',e=>{
 document.addEventListener('submit',e=>{
   e.preventDefault();const f=e.target,v=Object.fromEntries(new FormData(f));
   if(f.id==='host-form'){
+    v.host=v.host.trim();
+    if(/^[0-9.]+$/.test(v.host)){const parts=v.host.split('.');if(parts.length!==4||parts.some(p=>!/^\d{1,3}$/.test(p)||Number(p)>255)){$('#form-error').textContent='IPv4 地址需要四段数字，每段 0–255，请检查是否漏写了点';return;}}
     if(v.cwd&&!v.cwd.startsWith('/')){$('#form-error').textContent='工作目录须为 Linux 绝对路径';return;}
     const old=state.hosts.find(h=>h.id===f.dataset.id);
     if((!old?.hasSecret||old.auth!==v.auth)&&!(v.auth==='key'?v.privateKey.trim():v.password)){$('#form-error').textContent='请填写所选认证方式的凭据';return;}

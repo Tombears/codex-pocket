@@ -18,3 +18,5 @@ tools/browser-temp/
 *.key
 id_rsa*
 id_ed25519*
+*.p12
+app/src/androidTest/assets/ssh-fixture.json

@@ -24,6 +24,7 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  await page.evaluate(()=>window.receive({type:'state',state:window.fixture}));
  await page.screenshot({path:path.join(out,'CodexPocket-手机预览.png'),animations:'disabled'});
  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
+ assert.equal(await page.locator('.welcome-bottom').count(),0,'removed footer text must not appear');
  assert.equal(await page.locator('body').evaluate(b=>b.scrollWidth<=window.innerWidth),true,'no horizontal overflow');
  await page.locator('header [data-action=sidebar]').click();
  assert.equal(await page.locator('.host-row').count(),2);
@@ -48,6 +49,7 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  await page.screenshot({path:path.join(out,'CodexPocket-聊天预览.png'),animations:'disabled'});
  await page.locator('header [data-action=sidebar]').click();await page.locator('.settings-row').click();await page.locator('[data-action=theme][data-value=light]').click();
  await page.waitForFunction(()=>document.documentElement.dataset.theme==='light');
+ await page.locator('[data-action=exportLogs]').click();assert.equal(await page.evaluate(()=>window.commands.at(-1).type),'exportLogs');
  await page.locator('[data-action=theme][data-value=dark]').click();await page.locator('[data-action=closeDialog]').click();
  // Settings opens from the sidebar; closing it leaves the sidebar visible.
  // Ensure account secrets are never seeded into preview/bootstrap data.
@@ -80,10 +82,11 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  assert.equal(await page.locator('#host-form input[name=cwd]').inputValue(),'');
  assert.equal(await page.locator('#host-form input[name=codex]').inputValue(),'');
  assert.equal(await page.locator('#host-form input[name=cwd]').isVisible(),false);
- await page.locator('#host-form input[name=name]').fill('自动路径测试');await page.locator('#host-form input[name=host]').fill('192.0.2.40');await page.locator('#auth-select').selectOption('password');await page.locator('#host-form input[name=password]').fill('test-only');await page.locator('#save-host').click();
+ await page.locator('#host-form input[name=name]').fill('自动路径测试');await page.locator('#host-form input[name=host]').fill('192.02553.10');await page.locator('#auth-select').selectOption('password');await page.locator('#host-form input[name=password]').fill('test-only');await page.locator('#save-host').click();
+ assert.ok((await page.locator('#form-error').innerText()).includes('四段'));await page.locator('#host-form input[name=host]').fill('192.0.2.40');await page.locator('#save-host').click();
  assert.ok(await page.evaluate(()=>window.commands.some(a=>a.type==='saveHost'&&a.host.user==='root'&&a.host.cwd===''&&a.host.codex==='')));
  await page.locator('.dialog-head [data-action=closeDialog]').click();
  assert.deepEqual(errors,[],'no browser JS errors');
- fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation','connecting stage and cancellation','persistent connection errors','root default directory'],errors},null,2));
- console.log('UI checks passed: 14 workflows; screenshots saved.');await browser.close();server.close();
+ fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation','connecting stage and cancellation','persistent connection errors','root default directory','removed welcome footer','log export action','invalid IPv4 validation'],errors},null,2));
+ console.log('UI checks passed: 17 workflows; screenshots saved.');await browser.close();server.close();
 })().catch(e=>{console.error(e);server.close();process.exit(1);});

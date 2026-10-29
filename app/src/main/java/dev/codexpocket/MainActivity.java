@@ -49,11 +49,13 @@ public final class MainActivity extends Activity {
     public final class Bridge {
         @JavascriptInterface public void action(String json){
             try{JSONObject a=new JSONObject(json);if(a.optString("type").equals("copy")){android.content.ClipboardManager c=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);c.setPrimaryClip(ClipData.newPlainText("Codex",a.optString("text")));return;}
+                if(a.optString("type").equals("exportLogs")){runOnUiThread(()->{Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("text/plain");intent.putExtra(Intent.EXTRA_TITLE,"CodexPocket-log-"+new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",java.util.Locale.ROOT).format(new java.util.Date())+".txt");startActivityForResult(intent,20);});return;}
                 if(a.optString("type").equals("theme")){runOnUiThread(()->{boolean light=a.optString("value").equals("light");getWindow().setStatusBarColor(light?0xfff7f7f8:0xff17181b);getWindow().setNavigationBarColor(light?0xfff7f7f8:0xff17181b);getWindow().getDecorView().setSystemUiVisibility(light?View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR:0);});}
                 if(service!=null)service.action(a);
             }catch(Exception e){deliver(Json.obj("type","toast","message","请求无法解析"));}
         }
     }
+    @Override public void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(requestCode==20&&resultCode==RESULT_OK&&data!=null&&data.getData()!=null&&service!=null)service.exportLogs(data.getData());}
     @Override public void onBackPressed(){web.evaluateJavascript("window.back()",null);}
     @Override public void onDestroy(){pageReady=false;if(service!=null)service.unlisten(listener);if(bound)unbindService(connection);if(web!=null){web.removeJavascriptInterface("Android");web.destroy();web=null;}super.onDestroy();}
 }

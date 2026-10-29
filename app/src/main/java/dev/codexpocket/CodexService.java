@@ -57,7 +57,7 @@ public final class CodexService extends Service {
     void exportLogs(Uri uri){workers.submit(()->{try{if(diagnostics==null)throw new java.io.IOException("日志暂不可用");try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选文件");out.write(diagnostics.exportText().getBytes(StandardCharsets.UTF_8));}event(Json.obj("type","toast","message","已导出最近 24 小时日志"));}catch(Exception e){event(Json.obj("type","toast","message","日志导出失败："+e.getMessage()));}});}
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_STICKY;}
     void connected(String id){synchronized(connectionControl){CodexEngine e=engines.get(id);if(!destroyed&&e!=null&&e.connection.snapshot().status().equals("online")){store.keepConnected(id,true);reconnect.succeeded(id);}}}
-    private void disconnect(String id){synchronized(connectionControl){store.keepConnected(id,false);reconnect.forget(id);CodexEngine e=engines.get(id);if(e!=null)e.close();trustPrompts.remove(id);}}
+    private void disconnect(String id){synchronized(connectionControl){store.keepConnected(id,false);reconnect.forget(id);CodexEngine e=engines.remove(id);if(e!=null)e.dispose();trustPrompts.remove(id);}}
     private void maintainConnections(){
         if(destroyed||store==null)return;Set<String> wanted=store.wantedConnections();
         boolean active=!wanted.isEmpty()||!tests.isEmpty()||engines.values().stream().anyMatch(e->e.connection.snapshot().status().equals("connecting"));
@@ -144,5 +144,5 @@ public final class CodexService extends Service {
             }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
         });
     }
-    @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.close();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
+    @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
 }

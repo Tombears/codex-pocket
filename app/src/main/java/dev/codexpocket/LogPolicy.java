@@ -10,6 +10,7 @@ final class LogPolicy {
     private static final Pattern TOKEN=Pattern.compile("(?i)\\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,}|github_pat_[a-z0-9_]{12,}|Bearer\\s+[^\\s]+)");
     static String safe(String text){
         String value=text==null?"":text;
+        value=value.replaceAll("(?i)data:image/[^;,\\s]+;base64,[A-Za-z0-9+/=]+","[IMAGE REDACTED]");
         value=KEY.matcher(value).replaceAll("[PRIVATE KEY REDACTED]");
         value=SECRET.matcher(value).replaceAll("$1$2[REDACTED]");
         value=TOKEN.matcher(value).replaceAll("[TOKEN REDACTED]");

@@ -39,7 +39,7 @@
 
 ## 安装与使用
 
-支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.2.0 为正式发布版，沿用固定签名，支持设置内测试连接、Markdown、后台保活、自动重连、自动识别路径、30 秒连接总超时和日志导出，同页提供 `SHA256SUMS.txt` 校验文件。
+支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.3.0 为正式发布版，沿用固定签名，支持设置内测试连接、Markdown、后台保活、自动重连、自动识别路径、30 秒连接总超时和日志导出，同页提供 `SHA256SUMS.txt` 校验文件。
 
 也可以自行构建，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-release`（固定签名包）。下载 Actions 构建产物可能需要登录 GitHub。
 
@@ -72,6 +72,14 @@ codex login --device-auth
 > 查看当前项目结构，介绍如何启动，先不要修改文件。
 
 电脑上已有的 Codex 聊天可以在顶部虚拟机信息中选择「导入」，随后点击对应记录。聊天选项中的「刷新远程记录」会以服务器记录替换手机缓存中的消息。
+
+## 图片与执行中引导
+
+点击输入框旁的「＋」从系统选择器添加图片，每条最多 4 张，支持单独发送图片或图片加文字。发送前可预览、移除；失败时恢复草稿。原图上限 32 MB，发送图最长边 2048 像素、JPEG 最大 2 MB，转换时去除原始 EXIF。完整图片仅在应用私有缓存中加密暂存，发送成功后清除；未发送图片最长保留 24 小时，在访问时清理。消息历史保存加密缩略图，导入远程历史时不自动下载远程图片。
+
+图片作为 data URL 通过 SSH 发送给服务器上的 Codex，再由服务器按现有账号配置交给支持图片的模型；无需图床或新增服务器端口。原始图片文件不会在手机或服务器工作目录中公开保存。图片是否可用取决于远程 Codex/模型的图片输入支持。
+
+任务执行时仍可输入文字、添加图片并发送引导。引导使用当前 thread 和 expectedTurnId 调用 turn/steer，不新开任务；任务结束或断线时会报错并保留草稿，不自动转为新任务。停止任务使用单独的「停止」按钮。
 
 ## 后台连接
 
@@ -139,7 +147,7 @@ Linux CI 安装浏览器时使用 `npx playwright install --with-deps chromium`�
 
 ## 验证记录
 
-0.2.0 验证包含 20 项单元测试和 22 类界面流程，覆盖日志脱敏/24 小时策略、IP 校验、30 秒总超时、取消、自动路径、日志导出入口及原有聊天行为。CI 另提供 Android 模拟器测试：使用临时本地 SSH 服务验证 Android 原生连接引擎，并通过同签名 APK 的 `adb install -r` 覆盖安装检查配置、凭据、加密存储和聊天记录是否保留。模拟器测试涵盖 Android 15 / 16 的原生 SSH、未保存表单测试、后台连接、断线自动重连、主动断开停止重连，以及覆盖安装。模拟器不会使用真实服务器或用户私钥；实际执行结果见 Actions。
+0.3.0 验证包含 21 项单元测试和 25 类界面流程，覆盖日志脱敏/24 小时策略、IP 校验、30 秒总超时、取消、自动路径、日志导出入口及原有聊天行为。CI 另提供 Android 模拟器测试：使用临时本地 SSH 服务验证 Android 原生连接引擎，并通过同签名 APK 的 `adb install -r` 覆盖安装检查配置、凭据、加密存储和聊天记录是否保留。模拟器测试涵盖 Android 15 / 16 的原生 SSH、未保存表单测试、后台连接、断线自动重连、主动断开停止重连，以及覆盖安装。模拟器不会使用真实服务器或用户私钥；实际执行结果见 Actions。
 
 Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标及本地界面必须启用 JavaScript；JavaScript 仅在受限本地资源域使用，远程消息均转义后渲染。
 
@@ -156,7 +164,7 @@ Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标�
 - [Bouncy Castle](https://www.bouncycastle.org/licence.html)：现代 SSH 密钥算法支持，Bouncy Castle 许可。
 - [Android desugar libraries](https://github.com/google/desugar_jdk_libs)：较旧 Android 的 Java API 支持，采用上游许可证。
 
-版本：0.2.0；日期：2026-10-29（Asia/Shanghai）。
+版本：0.3.0；日期：2026-10-29（Asia/Shanghai）。
 
 ## 开源许可
 

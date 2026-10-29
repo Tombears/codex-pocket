@@ -32,6 +32,9 @@ public final class CodexService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     Store store;
     DiagnosticLog diagnostics;
+    private Attachments attachments;
+    private synchronized Attachments attachments()throws Exception{if(attachments==null)attachments=new Attachments(this);return attachments;}
+    void importImages(java.util.List<Uri> uris,String draftKey){workers.submit(()->{JSONArray selected=new JSONArray();for(Uri uri:uris.subList(0,Math.min(4,uris.size())))try{selected.put(attachments().add(uri));}catch(Exception|OutOfMemoryError ex){event(Json.obj("type","toast","message","无法添加图片："+ex.getMessage()));}event(Json.obj("type","imagesSelected","draftKey",draftKey,"images",selected));});}
     String initError;
     private volatile Listener listener;
     private boolean updatePending;
@@ -100,6 +103,7 @@ public final class CodexService extends Service {
     private CodexEngine engine(String id){if(store.host(id)==null)throw new IllegalArgumentException("虚拟机不存在");return engines.computeIfAbsent(id,h->new CodexEngine(this,h));}
     void action(JSONObject a){
         String type=a.optString("type");
+        if(type.equals("removeImage")){try{attachments().remove(a.optString("id"));}catch(Exception ignored){}return;}
         if(type.equals("testConnection")){testConnection(a);return;}
         if(type.equals("cancelConnectionTest")){cancelTests();return;}
         if(type.equals("trust")){
@@ -129,8 +133,8 @@ public final class CodexService extends Service {
                     case "renameChat":{JSONObject c=store.chat(chatId);if(c!=null&&!a.optString("title").isBlank())store.put(c,"title",a.optString("title"));break;}
                     case "connect":engine(hostId).connect();event(Json.obj("type","toast","message","SSH 与 Codex 已连接"));break;
                     case "disconnect":disconnect(hostId);break;
-                    case "send":{
-                        JSONObject c=store.chat(chatId);if(c==null)throw new Exception("请先新建聊天");String text=a.optString("text").strip();if(text.isEmpty()||text.length()>100000)throw new Exception("消息不能为空或超过 100000 字符");engine(c.optString("hostId")).send(chatId,text);break;
+                    case "send":case "steer":{
+                        JSONObject c=store.chat(chatId);if(c==null)throw new Exception("请先新建聊天");String text=a.optString("text").strip();Attachments.Batch images=attachments().prepare(a.optJSONArray("images"));if(text.isEmpty()&&images.input().length()==0||text.length()>100000)throw new Exception("请填写消息或选择图片，文字不能超过 100000 字符");CodexEngine e=engine(c.optString("hostId"));if(type.equals("steer"))e.steer(chatId,text,images);else e.send(chatId,text,images);for(int i=0;i<images.previews().length();i++)attachments().remove(images.previews().getJSONObject(i).getString("id"));break;
                     }
                     case "stop":{JSONObject c=store.chat(chatId);if(c!=null)engine(c.optString("hostId")).interrupt(chatId);break;}
                     case "approve":engine(hostId).approve(a.optString("token"),a.optString("decision"),a.optJSONObject("answers"));break;

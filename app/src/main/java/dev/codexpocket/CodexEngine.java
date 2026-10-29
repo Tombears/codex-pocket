@@ -127,7 +127,7 @@ final class CodexEngine {
             channel.setErrStream(stderr);
             channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
             rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.2.0")),30);
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.3.0")),30);
             requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
             for(String line:stderr.text().split("\n")){
@@ -155,7 +155,7 @@ final class CodexEngine {
         return message;
     }
     void trust(String fingerprint,boolean yes){CompletableFuture<Boolean> f=trust;if(f!=null&&Objects.equals(candidateFingerprint,fingerprint))f.complete(yes);}
-    synchronized void send(String chatId,String text)throws Exception{
+    synchronized void send(String chatId,String text,Attachments.Batch images)throws Exception{
         if(!busyChat.isEmpty())throw new IOException("这台虚拟机已有任务运行，请先等待或停止");
         connect();JSONObject chat=store.chat(chatId);if(chat==null||!chat.optString("hostId").equals(hostId))throw new IOException("聊天与虚拟机不匹配");
         busyChat=chatId;turnId="";store.put(chat,"status","working");
@@ -172,16 +172,22 @@ final class CodexEngine {
                 String resolvedCwd=result.getJSONObject("thread").optString("cwd",runtimeCwd);
                 if(!resolvedCwd.isBlank())store.put(chat,"cwd",resolvedCwd);loaded.add(chatId);
             }
-            store.message(chat,"user-"+UUID.randomUUID(),"user","text",text);
-            if(chat.optString("title").equals("新聊天"))store.put(chat,"title",text.substring(0,Math.min(28,text.length())));
+            JSONObject message=store.message(chat,"user-"+UUID.randomUUID(),"user","text",text);store.put(message,"images",images.previews());
+            if(chat.optString("title").equals("新聊天"))store.put(chat,"title",text.isEmpty()?"图片对话":text.substring(0,Math.min(28,text.length())));
             store.put(chat,"updatedAt",System.currentTimeMillis());
-            JSONObject turnParams=Json.obj("threadId",remote,"input",new JSONArray().put(Json.obj("type","text","text",text)),"approvalPolicy","on-request");
+            JSONObject turnParams=Json.obj("threadId",remote,"input",userInput(text,images),"approvalPolicy","on-request");
             if(!chat.optString("cwd").isBlank())turnParams.put("cwd",chat.optString("cwd"));
             String model=h.optString("model");if(!model.isBlank())turnParams.put("model",model);
             JSONObject r=rpc.request("turn/start",turnParams);
             // A very short turn can complete before the request response is read.
             if(busyChat.equals(chatId))turnId=r.optJSONObject("turn").optString("id");
         }catch(Exception e){store.put(chat,"status","error");store.message(chat,"err-"+UUID.randomUUID(),"system","error",errorMessage(e));busyChat="";turnId="";throw e;}
+    }
+    static JSONArray userInput(String text,Attachments.Batch images){JSONArray input=new JSONArray();if(!text.isEmpty())input.put(Json.obj("type","text","text",text));for(int i=0;i<images.input().length();i++)input.put(images.input().optJSONObject(i));return input;}
+    synchronized void steer(String chatId,String text,Attachments.Batch images)throws Exception{
+        if(!busyChat.equals(chatId)||rpc==null||turnId.isEmpty())throw new IOException("当前任务已结束或正在启动，请稍后重试；引导消息未自动转为新任务");JSONObject c=store.chat(chatId);String expected=turnId;
+        JSONObject m=store.message(c,"user-"+UUID.randomUUID(),"user","text",text);store.put(m,"images",images.previews());store.put(m,"steering",true);
+        try{rpc.request("turn/steer",Json.obj("threadId",c.optString("remoteId"),"expectedTurnId",expected,"input",userInput(text,images)));}catch(Exception ex){Store.remove(c.optJSONArray("messages"),m.optString("id"));store.touch();throw ex;}
     }
     void interrupt(String chatId)throws Exception{
         if(!busyChat.equals(chatId)||rpc==null)throw new IOException("当前聊天没有运行中的任务");

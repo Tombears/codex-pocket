@@ -35,6 +35,14 @@ def serve(path):
                 event=json.loads(raw.decode());method=event.get('method')
                 if 'id' not in event:continue
                 result={'userAgent':'android-ssh-fixture','platformOs':'linux','platformFamily':'unix','codexHome':'/home/fixture/.codex'} if method=='initialize' else {}
+                if method in ('thread/start','thread/resume'):result={'thread':{'id':'fixture-thread','cwd':'/home/fixture'}}
+                if method in ('turn/start','turn/steer'):
+                    params=event['params'];assert params['threadId']=='fixture-thread'
+                    if method=='turn/steer':assert params['expectedTurnId']=='fixture-turn'
+                    for item in params['input']:
+                        if item['type']=='image':assert item['url'].startswith('data:image/jpeg;base64,') and base64.b64decode(item['url'].split(',',1)[1]).startswith(b'\xff\xd8')
+                    result={'turn':{'id':'fixture-turn'}} if method=='turn/start' else {'turnId':'fixture-turn'}
+                    print('Validated '+method+' input; image count='+str(sum(i['type']=='image' for i in params['input'])),flush=True)
                 channel.sendall((json.dumps({'id':event['id'],'result':result})+'\n').encode())
         except Exception as e:print('Fixture transport closed: '+type(e).__name__,flush=True)
         finally:transport.close();sock.close()

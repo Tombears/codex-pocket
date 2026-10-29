@@ -5,6 +5,11 @@ const icon=(name,cls='')=>`<svg class="${cls}" aria-hidden="true"><use href="#i-
 let state={hosts:[],chats:[],theme:'dark',connections:{},trustPrompts:[]};
 let hostId='',chatId='',search='',collapsed=new Set(),pendingSend=new Map(),drafts=new Map(),toastTimer,dialogKind='',lastMessages='';
 let activeTrust=null,returnDialog=null,connectionTest=null;
+const imageDrafts=new Map();
+const draftKey=()=>chatId||'host-'+hostId;
+const currentImages=()=>imageDrafts.get(draftKey())||[];
+function imageHTML(images){return (images||[]).filter(i=>/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(i.preview||'')).map(i=>`<img class="chat-image" src="${esc(i.preview)}" alt="图片 ${Number(i.width)||''} × ${Number(i.height)||''}" loading="lazy">`).join('');}
+function renderImages(){const box=$('#image-previews');if(box)box.innerHTML=currentImages().map(i=>`<div class="attachment-preview">${imageHTML([i])}<button data-action="removeImage" data-id="${esc(i.id)}" aria-label="移除图片">×</button></div>`).join('');}
 const host=()=>state.hosts.find(h=>h.id===hostId);
 const chat=()=>state.chats.find(c=>c.id===chatId);
 const connection=id=>state.connections?.[id]||{status:'offline',busyChat:''};
@@ -58,7 +63,7 @@ function messageHTML(m){
   }
   if(m.kind==='error')return `<article class="message system"><div class="error-message">${esc(m.text)}</div></article>`;
   if(m.role==='tool')return `<article class="message tool"><details class="tool-box" data-item="${esc(m.id)}"><summary>${icon(m.kind==='files'?'folder':'terminal')}<span>${esc(m.kind==='files'?'文件改动':m.command||'命令输出')}</span><span class="tool-state">${esc(m.exitCode!=null?'exit '+m.exitCode:m.status==='completed'?'完成':m.status==='failed'?'失败':'执行中')}</span></summary><pre>${esc(m.text||'等待输出…')}</pre></details></article>`;
-  if(m.role==='user')return `<article class="message user"><div class="message-content">${esc(m.text)}</div></article>`;
+  if(m.role==='user')return `<article class="message user"><div class="message-content">${imageHTML(m.images)}${m.steering?'<small class="steering-label">任务引导</small>':''}${esc(m.text)}</div></article>`;
   return `<article class="message assistant"><div class="assistant-heading"><span class="mini-logo">${icon('code')}</span>Codex</div><div class="message-content">${markdown(m.text)}</div><div class="message-actions"><button class="icon" data-action="copy" data-id="${esc(m.id)}" aria-label="复制回答">${icon('copy')}</button></div></article>`;
 }
 function renderConversation(){
@@ -87,11 +92,11 @@ function renderConversation(){
 }
 function renderComposer(){
   const c=chat(),h=host(),con=connection(hostId),working=c?.status==='working';
-  $('#send').innerHTML=icon(working?'stop':'arrow');$('#send').classList.toggle('stop',working);
-  $('#send').setAttribute('aria-label',working?'停止任务':'发送消息');
-  $('#send').disabled=!h||(!working&&(pendingSend.has(chatId)||!!con.busyChat||!$('#prompt').value.trim()));
+  $('#send').innerHTML=icon('arrow');$('#send').classList.remove('stop');$('#stop-task').hidden=!working;renderImages();
+  $('#send').setAttribute('aria-label',working?'发送引导':'发送消息');
+  $('#send').disabled=!h||pendingSend.has(chatId)||!!(con.busyChat&&con.busyChat!==chatId)||(!$('#prompt').value.trim()&&!currentImages().length);$('#pick-images').disabled=!h||currentImages().length>=4;
   $('#prompt').disabled=!h;
-  $('#prompt').placeholder=h?'告诉 Codex 你想做什么…':'先添加一台虚拟机，开始对话';
+  $('#prompt').placeholder=h?(working?'补充要求，引导当前任务…':'告诉 Codex 你想做什么…'):'先添加一台虚拟机，开始对话';
   const hint=con.status==='error'?'连接失败，请查看连接设置中的错误详情':con.status==='connecting'?(con.phase||'正在建立 SSH 连接'):con.busyChat&&con.busyChat!==chatId?'这台虚拟机有其他聊天正在运行':pendingSend.has(chatId)?'正在连接并发送…':c?.status==='interrupted'?'连接已中断，可刷新远程记录后继续':h?`${h.name}  /  ${c?.cwd||con.cwd||h.cwd||'自动识别'}`:'SSH 直连服务器，无需额外中转服务';
   $('#composer-context').innerHTML=`<span class="${c?.status==='interrupted'?'warning':''}">${esc(hint)}</span>`;
 }
@@ -122,7 +127,7 @@ function newChat(id=hostId){
   openDialog('newChat',`${head('新建聊天')}<form id="chat-form"><div class="dialog-body"><p class="dialog-description">选择虚拟机与工作目录，开始一段独立的 Codex 会话。</p><div class="field-grid"><label class="field full">虚拟机<select name="hostId" id="new-host">${state.hosts.map(x=>`<option value="${esc(x.id)}" ${x.id===h.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label class="field full">工作目录<input name="cwd" id="new-cwd" value="${esc(h.cwd||'')}" placeholder="自动使用服务器用户主目录" autocapitalize="off" spellcheck="false"></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary">创建聊天</button></div></form>`);
 }
 function settings(){
-  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-item"><div><strong>导出调试日志</strong><small>仅保留最近 24 小时，不记录私钥和聊天正文</small></div><button class="btn" data-action="exportLogs">导出</button></div><div class="settings-title">后台连接</div><div class="settings-item"><div><strong>保持连接与自动重连</strong><small>已连接的服务器在后台继续保持；网络恢复后自动重连。主动断开会停止重连。</small></div>${icon('sync')}</div><div class="settings-item"><div><strong>${state.batteryUnrestricted?'已允许后台运行':'允许后台运行'}</strong><small>连接期间保活会增加耗电。vivo 等机型还需在系统中允许自启动和后台高耗电。</small></div><button class="btn" data-action="backgroundSettings">设置</button></div><div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.2.0 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。自动恢复 SSH 连接，中断任务不会自动重发。系统强制停止或厂商后台限制仍可能断开连接。</p></div>`);
+  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-item"><div><strong>导出调试日志</strong><small>仅保留最近 24 小时，不记录私钥和聊天正文</small></div><button class="btn" data-action="exportLogs">导出</button></div><div class="settings-title">后台连接</div><div class="settings-item"><div><strong>保持连接与自动重连</strong><small>已连接的服务器在后台继续保持；网络恢复后自动重连。主动断开会停止重连。</small></div>${icon('sync')}</div><div class="settings-item"><div><strong>${state.batteryUnrestricted?'已允许后台运行':'允许后台运行'}</strong><small>连接期间保活会增加耗电。vivo 等机型还需在系统中允许自启动和后台高耗电。</small></div><button class="btn" data-action="backgroundSettings">设置</button></div><div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.3.0 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。自动恢复 SSH 连接，中断任务不会自动重发。系统强制停止或厂商后台限制仍可能断开连接。</p></div>`);
 }
 function hostInfo(id=hostId){
   const h=state.hosts.find(h=>h.id===id);if(!h){editor();return;}const con=connection(id);
@@ -143,26 +148,26 @@ function trustPrompt(p){
   openDialog('trust',`${head('核对服务器身份')}<div class="dialog-body"><p class="dialog-description">首次连接 ${esc(p.name)}。请在云服务器控制台核对 SSH 主机指纹，确认是你的服务器后再信任。</p><div class="fingerprint">${esc(p.fingerprint)}</div><p class="about-note">地址：${esc(p.address)}<br>信任后将固定此密钥；密钥变化会阻止连接。</p></div><div class="dialog-actions"><button class="btn" data-action="rejectTrust">取消连接</button><button class="btn primary" data-action="acceptTrust">核对无误，信任</button></div>`);
 }
 function send(){
-  if(chat()?.status==='working'){native({type:'stop',chatId});return;}
-  const text=$('#prompt').value.trim();if(!text||!host())return;
-  if(!chatId){drafts.set('__new',text);native({type:'newChat',hostId,cwd:host().cwd});return;}
-  if(pendingSend.has(chatId)||connection(hostId).busyChat)return;
-  pendingSend.set(chatId,text);drafts.set(chatId,'');$('#prompt').value='';resize();renderComposer();native({type:'send',chatId,text});
+  const text=$('#prompt').value.trim(),images=currentImages();if((!text&&!images.length)||!host())return;
+  if(!chatId){drafts.set('__new',{text,images});native({type:'newChat',hostId,cwd:host().cwd});return;}
+  if(pendingSend.has(chatId)||(connection(hostId).busyChat&&connection(hostId).busyChat!==chatId))return;
+  const type=chat()?.status==='working'?'steer':'send';pendingSend.set(chatId,{text,images});drafts.set(chatId,'');imageDrafts.set(draftKey(),[]);$('#prompt').value='';resize();renderComposer();native({type,chatId,text,images:images.map(i=>({id:i.id}))});
 }
 window.receive=function(e){
   if(e.type==='state'){
     if(e.state.error){toast(e.state.error);return;}state=e.state;render();renderTestStatus();
     if(activeTrust&&!state.trustPrompts?.some(p=>p.hostId===activeTrust.hostId)){activeTrust=null;if(dialogKind==='trust')closeDialog();}
     const p=state.trustPrompts?.[0];if(p&&!activeTrust)trustPrompt(p);
-  }else if(e.type==='connectionTestResult'){if(connectionTest?.id===e.testId){connectionTest={...connectionTest,...e,running:false};renderTestStatus();}}
+  }else if(e.type==='imagesSelected'){const existing=imageDrafts.get(e.draftKey)||[];const all=[...existing,...e.images];for(const item of all.slice(4))native({type:'removeImage',id:item.id});imageDrafts.set(e.draftKey,all.slice(0,4));renderComposer();}
+  else if(e.type==='connectionTestResult'){if(connectionTest?.id===e.testId){connectionTest={...connectionTest,...e,running:false};renderTestStatus();}}
   else if(e.type==='hostSaved'){hostId=e.hostId;chatId='';closeDialog();toast('虚拟机已保存');}
   else if(e.type==='chatCreated'){
     if(e.state)state=e.state;chatId=e.chatId;hostId=e.hostId;lastMessages='';closeDialog();closeSidebar();
-    const draft=drafts.get('__new');if(draft){drafts.delete('__new');pendingSend.set(chatId,draft);$('#prompt').value='';native({type:'send',chatId,text:draft});}else $('#prompt').value='';resize();render();
+    const draft=drafts.get('__new');if(draft){drafts.delete('__new');imageDrafts.delete('host-'+hostId);pendingSend.set(chatId,draft);$('#prompt').value='';native({type:'send',chatId,text:draft.text,images:draft.images.map(i=>({id:i.id}))});}else $('#prompt').value='';resize();render();
   }else if(e.type==='actionComplete'){
-    if(e.action==='send'){pendingSend.delete(e.chatId);renderComposer();}
+    if(['send','steer'].includes(e.action)){pendingSend.delete(e.chatId);renderComposer();}
   }else if(e.type==='actionError'){
-    if(e.action==='send'){const draft=pendingSend.get(e.chatId);pendingSend.delete(e.chatId);if(draft){drafts.set(e.chatId,draft);if(e.chatId===chatId){$('#prompt').value=draft;resize();}}}
+    if(['send','steer'].includes(e.action)){const draft=pendingSend.get(e.chatId);pendingSend.delete(e.chatId);if(draft){drafts.set(e.chatId,draft.text);imageDrafts.set(e.chatId,draft.images);if(e.chatId===chatId){$('#prompt').value=draft.text;resize();}}}
     if(['saveHost','newChat'].includes(e.action)&&$('#form-error')){$('#form-error').textContent=e.message;const b=$('#save-host');if(b)b.disabled=false;}else toast(e.message);
     renderComposer();
   }else if(e.type==='trust')trustPrompt(e);
@@ -181,6 +186,9 @@ document.addEventListener('click',e=>{
     case 'selectChat':selectChat(id);break;
     case 'collapseHost':collapsed.has(id)?collapsed.delete(id):collapsed.add(id);renderSidebar();break;
     case 'settings':settings();break;
+    case 'pickImages':native({type:'pickImages',draftKey:draftKey()});break;
+    case 'removeImage':imageDrafts.set(draftKey(),currentImages().filter(i=>i.id!==id));native({type:'removeImage',id});renderComposer();break;
+    case 'stopTask':native({type:'stop',chatId});break;
     case 'exportLogs':native({type:'exportLogs'});break;
     case 'backgroundSettings':native({type:'backgroundSettings'});break;
     case 'testConnection':{

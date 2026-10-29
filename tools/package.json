@@ -1,0 +1,7 @@
+{
+  "name": "codex-pocket-ui-checks",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "test": "node test-ui.cjs" },
+  "devDependencies": { "playwright": "1.64.1" }
+}

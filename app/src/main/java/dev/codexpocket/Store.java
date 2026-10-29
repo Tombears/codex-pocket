@@ -40,7 +40,10 @@ final class Store {
             JSONObject chat=chats.getJSONObject(i);
             if(chat.optString("status").equals("working"))chat.put("status","interrupted");
             JSONArray ms=chat.optJSONArray("messages");
-            if(ms!=null)for(int j=0;j<ms.length();j++)if(ms.getJSONObject(j).optString("kind").equals("approval"))ms.getJSONObject(j).put("resolved",true);
+            if(ms!=null)for(int j=0;j<ms.length();j++){
+                JSONObject message=ms.getJSONObject(j);if(message.optString("kind").equals("approval"))message.put("resolved",true);
+                JSONArray images=message.optJSONArray("remoteImages");if(images!=null)for(int k=0;k<images.length();k++){JSONObject image=images.optJSONObject(k);if(image!=null&&Set.of("loading","pending").contains(image.optString("status")))image.put("status","failed");}
+            }
         }
         if(migrated)flush();
     }
@@ -95,7 +98,7 @@ final class Store {
     synchronized JSONObject newChat(String hostId,String cwd)throws Exception{
         JSONObject host=host(hostId);if(host==null)throw new Exception("请先添加虚拟机");
         JSONObject chat=Json.obj("id",UUID.randomUUID().toString(),"hostId",hostId,"cwd",cwd,"title","新聊天","messages",new JSONArray(),"status","idle","updatedAt",System.currentTimeMillis());
-        data.getJSONArray("chats").put(chat);touch();return chat;
+        chat.put("approvalMode",data.optString("approvalMode","on-request"));data.getJSONArray("chats").put(chat);touch();return chat;
     }
     synchronized void put(JSONObject o,String k,Object value){try{o.put(k,value);}catch(Exception e){throw new IllegalStateException(e);}touch();}
     synchronized JSONObject message(JSONObject chat,String id,String role,String kind,String text){
@@ -114,5 +117,9 @@ final class Store {
         flush();changed.run();
     }
     synchronized void theme(String v){if(!v.equals("dark")&&!v.equals("light"))return;put(data,"theme",v);}
+    synchronized String approvalMode(JSONObject chat){return ApprovalMode.require(chat.optString("approvalMode",data.optString("approvalMode","on-request")));}
+    synchronized void approvalMode(String chatId,String mode){
+        ApprovalMode.require(mode);JSONObject chat=chat(chatId);put(data,"approvalMode",mode);if(chat!=null)put(chat,"approvalMode",mode);flush();
+    }
     static void remove(JSONArray arr,String id){for(int i=arr.length()-1;i>=0;i--)if(arr.optJSONObject(i).optString("id").equals(id))arr.remove(i);}
 }

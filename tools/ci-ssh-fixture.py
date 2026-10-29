@@ -1,9 +1,14 @@
 """Ephemeral localhost SSH fixture for Android tests. Never uses real user credentials."""
-import io,json,pathlib,socket,sys,threading
+import io,json,pathlib,socket,sys,threading,stat,struct,zlib
 import paramiko
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,NoEncryption
 import hashlib,base64
+
+def fixture_png():
+    def chunk(kind,data):return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data)&0xffffffff)
+    rows=(b'\x00'+b'\x40\x80\xff\x00'*32)*24
+    return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!IIBBBBB',32,24,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b'')
 
 def generate(path):
     def key():return Ed25519PrivateKey.generate().private_bytes(Encoding.PEM,PrivateFormat.OpenSSH,NoEncryption()).decode()
@@ -18,6 +23,14 @@ def serve(path):
     config=json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
     host=paramiko.Ed25519Key.from_private_key(io.StringIO(config['hostKey']))
     client=paramiko.Ed25519Key.from_private_key(io.StringIO(config['clientKey']))
+    class Images(paramiko.SFTPServerInterface):
+        def stat(self,path):
+            if path!='/home/fixture/output/cat.png':return paramiko.SFTP_NO_SUCH_FILE
+            attrs=paramiko.SFTPAttributes();attrs.st_size=len(fixture_png());attrs.st_mode=stat.S_IFREG|0o444;return attrs
+        def open(self,path,flags,attr):
+            if path!='/home/fixture/output/cat.png':return paramiko.SFTP_NO_SUCH_FILE
+            if flags&3:return paramiko.SFTP_PERMISSION_DENIED
+            handle=paramiko.SFTPHandle(flags);handle.readfile=io.BytesIO(fixture_png());return handle
     class Server(paramiko.ServerInterface):
         def __init__(self):self.ready=threading.Event()
         def get_allowed_auths(self,username):return 'publickey,password'
@@ -26,7 +39,7 @@ def serve(path):
         def check_channel_request(self,kind,chanid):return paramiko.OPEN_SUCCEEDED if kind=='session' else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
         def check_channel_exec_request(self,channel,command):self.ready.set();return True
     def handle(sock):
-        transport=paramiko.Transport(sock);transport.add_server_key(host);server=Server()
+        transport=paramiko.Transport(sock);transport.add_server_key(host);transport.set_subsystem_handler('sftp',paramiko.SFTPServer,Images);server=Server()
         try:
             transport.start_server(server=server);channel=transport.accept(30)
             if channel is None or not server.ready.wait(30):return
@@ -35,9 +48,12 @@ def serve(path):
                 event=json.loads(raw.decode());method=event.get('method')
                 if 'id' not in event:continue
                 result={'userAgent':'android-ssh-fixture','platformOs':'linux','platformFamily':'unix','codexHome':'/home/fixture/.codex'} if method=='initialize' else {}
-                if method in ('thread/start','thread/resume'):result={'thread':{'id':'fixture-thread','cwd':'/home/fixture'}}
+                if method in ('thread/start','thread/resume'):
+                    assert event['params']['approvalPolicy'] in ('on-request','untrusted','never')
+                    result={'thread':{'id':'fixture-thread','cwd':'/home/fixture'}}
                 if method in ('turn/start','turn/steer'):
                     params=event['params'];assert params['threadId']=='fixture-thread'
+                    if method=='turn/start':assert params['approvalPolicy'] in ('on-request','untrusted','never')
                     if method=='turn/steer':assert params['expectedTurnId']=='fixture-turn'
                     for item in params['input']:
                         if item['type']=='image':assert item['url'].startswith('data:image/jpeg;base64,') and base64.b64decode(item['url'].split(',',1)[1]).startswith(b'\xff\xd8')

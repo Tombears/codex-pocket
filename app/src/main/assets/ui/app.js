@@ -56,15 +56,27 @@ function welcomeHTML(){
 function markdown(text){
   return window.renderMarkdown(text);
 }
+const approvalLabels={'on-request':'按需审批',untrusted:'严格审批',never:'不询问'};
+function approvalMode(){return chat()?.approvalMode||state.approvalMode||'on-request';}
+function remoteImagesHTML(m){
+  return (m.remoteImages||[]).map((i,index)=>{
+    const ready=/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(i.preview||'');
+    return `<button class="remote-image-card" data-action="${ready?'viewRemoteImage':'loadRemoteImage'}" data-id="${esc(m.id)}" data-index="${index}" ${i.status==='loading'?'disabled':''} aria-label="${ready?'查看大图':'加载图片'}">${ready?`<img class="received-image" src="${esc(i.preview)}" alt="${esc(i.name||'服务器图片')}" loading="lazy">`:icon('folder')}<span>${esc(i.name||'服务器图片')}</span><small>${ready?'查看大图':i.status==='failed'?'加载失败，点击重试':i.status==='loading'?'正在接收图片…':'加载图片'}</small></button>`;
+  }).join('');
+}
+function approvalModeDialog(){
+  const descriptions={'on-request':'由 Codex 判断何时请求审批。',untrusted:'除受信任的只读操作外，请求执行审批。',never:'不弹出执行审批；超出当前权限的操作会失败。'};
+  openDialog('approvalMode',`${head('审批模式')}<div class="dialog-body"><p class="dialog-description">${chat()?.status==='working'?'当前任务继续使用原模式，选择从下一次任务生效。':'选择当前聊天的审批方式，新聊天沿用最近选择。'}</p>${Object.entries(approvalLabels).map(([value,label])=>`<button class="approval-mode-option ${approvalMode()===value?'chosen':''}" data-action="setApprovalMode" data-value="${value}"><strong>${label}</strong><small>${descriptions[value]}</small></button>`).join('')}</div>`);
+}
 function messageHTML(m){
   if(m.kind==='approval'){
     const p=m.params||{},qs=p.questions||[],isQuestion=m.approvalType==='item/tool/requestUserInput';
     return `<article class="message system"><div class="approval"><div class="approval-heading">${icon('shield')}${m.resolved?'请求已处理':isQuestion?'Codex 想确认一些信息':'等待你的审批'}</div>${isQuestion?qs.map((q,i)=>`<label for="q-${esc(m.id)}-${i}">${esc(q.header||'')} ${esc(q.question||'')}</label>${q.options?.length?`<div class="question-hint">${q.options.map(o=>esc(o.label)+(o.description?'：'+esc(o.description):'')).join(' / ')}</div>`:''}${!m.resolved?`<input id="q-${esc(m.id)}-${i}" data-question="${esc(q.id)}" data-token="${esc(m.id)}" placeholder="输入回答" autocomplete="off">`:''}`).join(''):`<pre>${esc(m.text)}${p.cwd?'\n\n工作目录：'+esc(p.cwd):''}</pre>`}${m.resolved?`<div class="approval-resolved">${esc(m.resolution||'连接或请求已结束')}</div>`:`<div class="approval-actions">${isQuestion?`<button class="btn primary" data-action="answer" data-token="${esc(m.id)}">提交回答</button>`:`<button class="btn primary" data-action="approve" data-token="${esc(m.id)}">允许本次</button><button class="btn" data-action="decline" data-token="${esc(m.id)}">拒绝</button>`}</div>`}</div></article>`;
   }
   if(m.kind==='error')return `<article class="message system"><div class="error-message">${esc(m.text)}</div></article>`;
-  if(m.role==='tool')return `<article class="message tool"><details class="tool-box" data-item="${esc(m.id)}"><summary>${icon(m.kind==='files'?'folder':'terminal')}<span>${esc(m.kind==='files'?'文件改动':m.command||'命令输出')}</span><span class="tool-state">${esc(m.exitCode!=null?'exit '+m.exitCode:m.status==='completed'?'完成':m.status==='failed'?'失败':'执行中')}</span></summary><pre>${esc(m.text||'等待输出…')}</pre></details></article>`;
+  if(m.role==='tool')return `<article class="message tool"><details class="tool-box" data-item="${esc(m.id)}"><summary>${icon(m.kind==='files'?'folder':'terminal')}<span class="tool-command" title="${esc(m.command||'')}">${esc(m.kind==='files'?'文件改动':(m.command||'命令输出').replace(/\s+/g,' '))}</span><span class="tool-state">${esc(m.exitCode!=null?'exit '+m.exitCode:m.status==='completed'?'完成':m.status==='failed'?'失败':'执行中')}</span></summary>${m.command?`<pre class="tool-full-command">${esc(m.command)}</pre>`:''}<pre>${esc(m.text||'等待输出…')}</pre></details></article>`;
   if(m.role==='user')return `<article class="message user"><div class="message-content">${imageHTML(m.images)}${m.steering?'<small class="steering-label">任务引导</small>':''}${esc(m.text)}</div></article>`;
-  return `<article class="message assistant"><div class="assistant-heading"><span class="mini-logo">${icon('code')}</span>Codex</div><div class="message-content">${markdown(m.text)}</div><div class="message-actions"><button class="icon" data-action="copy" data-id="${esc(m.id)}" aria-label="复制回答">${icon('copy')}</button></div></article>`;
+  return `<article class="message assistant"><div class="assistant-heading"><span class="mini-logo">${icon('code')}</span>Codex</div><div class="message-content">${markdown(m.text)}<div class="received-images">${remoteImagesHTML(m)}</div></div><div class="message-actions"><button class="icon" data-action="copy" data-id="${esc(m.id)}" aria-label="复制回答">${icon('copy')}</button></div></article>`;
 }
 function renderConversation(){
   const c=chat(),ms=c?.messages||[];const welcome=ms.length===0;
@@ -92,6 +104,7 @@ function renderConversation(){
 }
 function renderComposer(){
   const c=chat(),h=host(),con=connection(hostId),working=c?.status==='working';
+  $('#mode-label').textContent=(approvalLabels[approvalMode()]||approvalLabels['on-request'])+' ▾';$('#mode-label').disabled=!h;
   $('#send').innerHTML=icon('arrow');$('#send').classList.remove('stop');$('#stop-task').hidden=!working;renderImages();
   $('#send').setAttribute('aria-label',working?'发送引导':'发送消息');
   $('#send').disabled=!h||pendingSend.has(chatId)||!!(con.busyChat&&con.busyChat!==chatId)||(!$('#prompt').value.trim()&&!currentImages().length);$('#pick-images').disabled=!h||currentImages().length>=4;
@@ -127,7 +140,7 @@ function newChat(id=hostId){
   openDialog('newChat',`${head('新建聊天')}<form id="chat-form"><div class="dialog-body"><p class="dialog-description">选择虚拟机与工作目录，开始一段独立的 Codex 会话。</p><div class="field-grid"><label class="field full">虚拟机<select name="hostId" id="new-host">${state.hosts.map(x=>`<option value="${esc(x.id)}" ${x.id===h.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label class="field full">工作目录<input name="cwd" id="new-cwd" value="${esc(h.cwd||'')}" placeholder="自动使用服务器用户主目录" autocapitalize="off" spellcheck="false"></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary">创建聊天</button></div></form>`);
 }
 function settings(){
-  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-item"><div><strong>导出调试日志</strong><small>仅保留最近 24 小时，不记录私钥和聊天正文</small></div><button class="btn" data-action="exportLogs">导出</button></div><div class="settings-title">后台连接</div><div class="settings-item"><div><strong>保持连接与自动重连</strong><small>已连接的服务器在后台继续保持；网络恢复后自动重连。主动断开会停止重连。</small></div>${icon('sync')}</div><div class="settings-item"><div><strong>${state.batteryUnrestricted?'已允许后台运行':'允许后台运行'}</strong><small>连接期间保活会增加耗电。vivo 等机型还需在系统中允许自启动和后台高耗电。</small></div><button class="btn" data-action="backgroundSettings">设置</button></div><div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.3.0 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。自动恢复 SSH 连接，中断任务不会自动重发。系统强制停止或厂商后台限制仍可能断开连接。</p></div>`);
+  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-item"><div><strong>导出调试日志</strong><small>仅保留最近 24 小时，不记录私钥和聊天正文</small></div><button class="btn" data-action="exportLogs">导出</button></div><div class="settings-title">后台连接</div><div class="settings-item"><div><strong>保持连接与自动重连</strong><small>已连接的服务器在后台继续保持；网络恢复后自动重连。主动断开会停止重连。</small></div>${icon('sync')}</div><div class="settings-item"><div><strong>${state.batteryUnrestricted?'已允许后台运行':'允许后台运行'}</strong><small>连接期间保活会增加耗电。vivo 等机型还需在系统中允许自启动和后台高耗电。</small></div><button class="btn" data-action="backgroundSettings">设置</button></div><div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.4.0 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。自动恢复 SSH 连接，中断任务不会自动重发。系统强制停止或厂商后台限制仍可能断开连接。</p></div>`);
 }
 function hostInfo(id=hostId){
   const h=state.hosts.find(h=>h.id===id);if(!h){editor();return;}const con=connection(id);
@@ -159,6 +172,9 @@ window.receive=function(e){
     if(activeTrust&&!state.trustPrompts?.some(p=>p.hostId===activeTrust.hostId)){activeTrust=null;if(dialogKind==='trust')closeDialog();}
     const p=state.trustPrompts?.[0];if(p&&!activeTrust)trustPrompt(p);
   }else if(e.type==='imagesSelected'){const existing=imageDrafts.get(e.draftKey)||[];const all=[...existing,...e.images];for(const item of all.slice(4))native({type:'removeImage',id:item.id});imageDrafts.set(e.draftKey,all.slice(0,4));renderComposer();}
+  else if(e.type==='remoteImageOpened'){
+    if(e.chatId===chatId&&/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(e.preview||''))openDialog('image',`${head(e.name||'服务器图片')}<div class="dialog-body image-viewer"><img src="${esc(e.preview)}" alt="${esc(e.name||'服务器图片')}"></div>`);
+  }
   else if(e.type==='connectionTestResult'){if(connectionTest?.id===e.testId){connectionTest={...connectionTest,...e,running:false};renderTestStatus();}}
   else if(e.type==='hostSaved'){hostId=e.hostId;chatId='';closeDialog();toast('虚拟机已保存');}
   else if(e.type==='chatCreated'){
@@ -186,6 +202,9 @@ document.addEventListener('click',e=>{
     case 'selectChat':selectChat(id);break;
     case 'collapseHost':collapsed.has(id)?collapsed.delete(id):collapsed.add(id);renderSidebar();break;
     case 'settings':settings();break;
+    case 'approvalMode':approvalModeDialog();break;
+    case 'setApprovalMode':native({type:'approvalMode',chatId,value:b.dataset.value});closeDialog();break;
+    case 'loadRemoteImage':case 'viewRemoteImage':native({type:a,chatId,messageId:id,index:Number(b.dataset.index)});break;
     case 'pickImages':native({type:'pickImages',draftKey:draftKey()});break;
     case 'removeImage':imageDrafts.set(draftKey(),currentImages().filter(i=>i.id!==id));native({type:'removeImage',id});renderComposer();break;
     case 'stopTask':native({type:'stop',chatId});break;

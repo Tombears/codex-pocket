@@ -162,7 +162,8 @@ final class CodexEngine {
         try{
             String remote=chat.optString("remoteId");
             JSONObject h=store.host(hostId);
-            JSONObject params=Json.obj("approvalPolicy","on-request","approvalsReviewer","user","sandbox","workspace-write");
+            String approvalMode=store.approvalMode(chat);
+            JSONObject params=Json.obj("approvalPolicy",approvalMode,"approvalsReviewer","user","sandbox","workspace-write");
             if(!chat.optString("cwd").isBlank())params.put("cwd",chat.optString("cwd"));
             if(!remote.isEmpty())params.put("threadId",remote);
             JSONObject result;
@@ -175,7 +176,7 @@ final class CodexEngine {
             JSONObject message=store.message(chat,"user-"+UUID.randomUUID(),"user","text",text);store.put(message,"images",images.previews());
             if(chat.optString("title").equals("新聊天"))store.put(chat,"title",text.isEmpty()?"图片对话":text.substring(0,Math.min(28,text.length())));
             store.put(chat,"updatedAt",System.currentTimeMillis());
-            JSONObject turnParams=Json.obj("threadId",remote,"input",userInput(text,images),"approvalPolicy","on-request");
+            JSONObject turnParams=Json.obj("threadId",remote,"input",userInput(text,images),"approvalPolicy",approvalMode);
             if(!chat.optString("cwd").isBlank())turnParams.put("cwd",chat.optString("cwd"));
             String model=h.optString("model");if(!model.isBlank())turnParams.put("model",model);
             JSONObject r=rpc.request("turn/start",turnParams);
@@ -235,8 +236,11 @@ final class CodexEngine {
     }
     private void recordItem(JSONObject c,JSONObject item,boolean completed)throws Exception{
         String type=item.optString("type"),id=item.optString("id");
+        List<String> inlineImages=completed?RemoteImages.inline(item):List.of();
         if(type.equals("agentMessage")){
             if(!item.optString("text").isEmpty())store.message(c,id,"assistant","text",item.optString("text"));
+        }else if(type.equals("imageView")||type.equals("imageGeneration")){
+            if(completed)store.message(c,id,"assistant","image",item.optString("status").equals("failed")?"图片生成失败":"");
         }else if(type.equals("commandExecution")){
             JSONObject existing=Store.find(c.optJSONArray("messages"),id);
             String output=completed?item.optString("aggregatedOutput",existing==null?"":existing.optString("text")):"";
@@ -251,6 +255,29 @@ final class CodexEngine {
             for(int i=messages.length()-1;i>=0;i--){JSONObject m=messages.optJSONObject(i);if(m.optString("id").startsWith("user-")&&m.optString("text").equals(text.toString())){store.put(m,"id",id);reconciled=true;break;}}
             if(!reconciled)store.message(c,id,"user","text",text.toString());
         }
+        if(!inlineImages.isEmpty()&&Store.find(c.optJSONArray("messages"),id)==null)store.message(c,id,"assistant","image","");
+        if(completed){
+            JSONArray refs=RemoteImages.references(item,c.optString("cwd",runtimeCwd));JSONObject message=Store.find(c.optJSONArray("messages"),id);
+            int attachedInline=0;for(int i=0;i<refs.length();i++)if(refs.optJSONObject(i).optBoolean("inline"))attachedInline++;
+            for(int i=attachedInline;i<inlineImages.size()&&refs.length()<Attachments.MAX_IMAGES;i++)refs.put(Json.obj("name","服务器图片 "+(i+1),"inline",true,"status","pending"));
+            if(message!=null&&refs.length()>0){
+                JSONArray old=message.optJSONArray("remoteImages");
+                if(old!=null)for(int i=0;i<refs.length();i++)for(int j=0;j<old.length();j++){
+                    JSONObject ref=refs.getJSONObject(i),prior=old.getJSONObject(j);
+                    if(!ref.optString("path").isEmpty()&&ref.optString("path").equals(prior.optString("path"))||ref.optBoolean("inline")&&prior.optBoolean("inline")&&i==j)refs.put(i,prior);
+                }
+                store.put(message,"remoteImages",refs);owner.receiveRemoteImages(this,c.optString("id"),id,inlineImages);
+            }
+        }
+    }
+    byte[] readImage(String path)throws Exception{
+        Session session=ssh;if(session==null||!session.isConnected())throw new IOException("服务器未连接，请连接后重试");
+        ChannelSftp sftp=(ChannelSftp)session.openChannel("sftp");
+        try{
+            sftp.connect(10000);SftpATTRS attrs=sftp.stat(path);
+            if(attrs.isDir()||attrs.getSize()>RemoteImages.MAX_BYTES)throw new IOException("图片不可读取或超过 32 MB");
+            try(InputStream input=sftp.get(path)){return RemoteImages.readBounded(input);}
+        }finally{sftp.disconnect();}
     }
     void approve(String token,String decision,JSONObject answers)throws Exception{
         Pending p=approvals.get(token);if(p==null||rpc==null)throw new IOException("该请求已结束或连接已断开");

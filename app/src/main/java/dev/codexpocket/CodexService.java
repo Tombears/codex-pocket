@@ -29,12 +29,39 @@ public final class CodexService extends Service {
         @Override public void onLost(Network network){if(destroyed)return;for(CodexEngine e:engines.values())try{workers.submit(e::networkLost);}catch(RejectedExecutionException ignored){}}
     };
     private final ExecutorService workers=Executors.newCachedThreadPool();
+    private final ExecutorService imageWorkers=Executors.newSingleThreadExecutor();
+    private final Set<String> imageJobs=ConcurrentHashMap.newKeySet();
     private final Handler main=new Handler(Looper.getMainLooper());
     Store store;
     DiagnosticLog diagnostics;
     private Attachments attachments;
     private synchronized Attachments attachments()throws Exception{if(attachments==null)attachments=new Attachments(this);return attachments;}
     void importImages(java.util.List<Uri> uris,String draftKey){workers.submit(()->{JSONArray selected=new JSONArray();for(Uri uri:uris.subList(0,Math.min(4,uris.size())))try{selected.put(attachments().add(uri));}catch(Exception|OutOfMemoryError ex){event(Json.obj("type","toast","message","无法添加图片："+ex.getMessage()));}event(Json.obj("type","imagesSelected","draftKey",draftKey,"images",selected));});}
+    private JSONObject remoteImage(String chatId,String messageId,int index){
+        JSONObject c=store.chat(chatId);if(c==null)return null;JSONObject m=Store.find(c.optJSONArray("messages"),messageId);
+        JSONArray images=m==null?null:m.optJSONArray("remoteImages");return images==null?null:images.optJSONObject(index);
+    }
+    void receiveRemoteImages(CodexEngine engine,String chatId,String messageId,List<String> inline){
+        JSONObject c=store.chat(chatId);if(c==null)return;JSONObject m=Store.find(c.optJSONArray("messages"),messageId);JSONArray images=m==null?null:m.optJSONArray("remoteImages");
+        int inlineIndex=0;
+        if(images!=null)for(int i=0;i<images.length();i++){JSONObject image=images.optJSONObject(i);if(image==null)continue;String data=image.optBoolean("inline")&&inlineIndex<inline.size()?inline.get(inlineIndex++):null;if(image.optString("status").equals("pending"))loadRemoteImage(engine,chatId,messageId,i,false,data);}
+    }
+    private void loadRemoteImage(CodexEngine engine,String chatId,String messageId,int index,boolean open,String inline){
+        JSONObject image=remoteImage(chatId,messageId,index);if(image==null)return;String job=chatId+"/"+messageId+"/"+index;
+        if(!imageJobs.add(job))return;store.put(image,"status","loading");String path=image.optString("path");
+        imageWorkers.submit(()->{
+            try{
+                if(inline==null&&path.isEmpty())throw new java.io.IOException("图片缓存已过期，请刷新远程记录");
+                byte[] bytes;
+                if(inline!=null)try{bytes=RemoteImages.decodeInline(inline);}catch(java.io.IOException ex){if(path.isEmpty())throw ex;bytes=engine.readImage(path);}else bytes=engine.readImage(path);
+                JSONObject preview=attachments().add(bytes);JSONObject current=remoteImage(chatId,messageId,index);
+                if(current==null||!path.equals(current.optString("path"))){attachments().remove(preview.optString("id"));return;}
+                for(String key:new String[]{"id","preview","width","height"})store.put(current,key,preview.opt(key));store.put(current,"status","ready");
+                if(open)event(Json.obj("type","remoteImageOpened","chatId",chatId,"name",current.optString("name"),"preview",attachments().fullPreview(current.optString("id"))));
+            }catch(Exception|OutOfMemoryError ex){JSONObject current=remoteImage(chatId,messageId,index);if(current!=null&&path.equals(current.optString("path")))store.put(current,"status","failed");if(open)event(Json.obj("type","toast","message","图片加载失败，请检查服务器连接后重试"));}
+            finally{imageJobs.remove(job);update();}
+        });
+    }
     String initError;
     private volatile Listener listener;
     private boolean updatePending;
@@ -141,6 +168,13 @@ public final class CodexService extends Service {
                     case "syncHistory":engine(hostId).syncHistory();break;
                     case "loadHistory":{JSONObject c=store.chat(chatId);if(c!=null)engine(c.optString("hostId")).loadHistory(chatId);break;}
                     case "theme":store.theme(a.optString("value"));break;
+                    case "approvalMode":store.approvalMode(chatId,a.optString("value"));break;
+                    case "loadRemoteImage":case "viewRemoteImage":{
+                        JSONObject c=store.chat(chatId);if(c==null)throw new Exception("聊天不存在");String messageId=a.optString("messageId");int index=a.optInt("index",-1);JSONObject image=remoteImage(chatId,messageId,index);if(image==null)throw new Exception("图片不存在");
+                        if(type.equals("viewRemoteImage")&&!image.optString("id").isEmpty())try{event(Json.obj("type","remoteImageOpened","chatId",chatId,"name",image.optString("name"),"preview",attachments().fullPreview(image.optString("id"))));break;}catch(Exception ignored){}
+                        if(image.optBoolean("inline")&&image.optString("path").isEmpty())throw new Exception("图片缓存已过期，请刷新远程记录重新接收");
+                        CodexEngine e=engine(c.optString("hostId"));e.connect();loadRemoteImage(e,chatId,messageId,index,type.equals("viewRemoteImage"),null);break;
+                    }
                     case "disconnectAll":for(String id:store.wantedConnections())disconnect(id);for(CodexEngine e:engines.values())disconnect(e.hostId);cancelTests();trustPrompts.clear();break;
                     default:throw new IllegalArgumentException("未知操作");
                 }
@@ -148,5 +182,5 @@ public final class CodexService extends Service {
             }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
         });
     }
-    @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
+    @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();imageWorkers.shutdownNow();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
 }

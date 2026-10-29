@@ -29,13 +29,24 @@ final class Attachments {
     }
     synchronized void prune(){File[] files=dir.listFiles();if(files!=null)for(File f:files)if(f.lastModified()<System.currentTimeMillis()-86_400_000L)f.delete();}
     private File file(String id)throws IOException{if(!id.matches("[a-f0-9-]{36}"))throw new IOException("图片标识无效");return new File(dir,id+".bin");}
-    synchronized void remove(String id){try{file(id).delete();}catch(IOException ignored){}}
+    private File originalFile(String id)throws IOException{file(id);return new File(dir,id+".original");}
+    synchronized void remove(String id){try{file(id).delete();originalFile(id).delete();}catch(IOException ignored){}}
     synchronized JSONObject add(Uri uri)throws Exception{
         prune();byte[] source;try(InputStream in=context.getContentResolver().openInputStream(uri)){if(in==null)throw new IOException("无法读取图片");ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){if(out.size()+n>32*1024*1024)throw new IOException("原图超过 32 MB，请选择较小的图片");out.write(buf,0,n);}source=out.toByteArray();}
         return add(source,false);
     }
     synchronized JSONObject add(byte[] source)throws Exception{
-        return add(source,true);
+        String mime=ImageFormat.mime(source);JSONObject preview=add(source,true);String id=preview.getString("id");
+        try{Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key);try(FileOutputStream out=new FileOutputStream(originalFile(id))){out.write(cipher.getIV());out.write(cipher.doFinal(source));}preview.put("original",true);preview.put("mime",mime);return preview;}
+        catch(Exception|OutOfMemoryError e){remove(id);throw e;}
+    }
+    record Original(byte[] bytes,String mime){}
+    synchronized boolean hasOriginal(String id){try{File f=originalFile(id);return f.isFile()&&f.lastModified()>=System.currentTimeMillis()-86_400_000L;}catch(IOException e){return false;}}
+    synchronized Original original(String id)throws Exception{
+        if(!hasOriginal(id))throw new IOException("原图缓存已过期，请重新接收图片");File f=originalFile(id);
+        if(f.length()<28||f.length()>RemoteImages.MAX_BYTES+28L)throw new IOException("原图缓存无效");
+        byte[] raw=Files.readAllBytes(f.toPath());Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,key,new GCMParameterSpec(128,Arrays.copyOfRange(raw,0,12)));
+        byte[] bytes=cipher.doFinal(Arrays.copyOfRange(raw,12,raw.length));return new Original(bytes,ImageFormat.mime(bytes));
     }
     private JSONObject add(byte[] source,boolean preserveAlpha)throws Exception{
         prune();if(source.length>RemoteImages.MAX_BYTES)throw new IOException("图片超过 32 MB");

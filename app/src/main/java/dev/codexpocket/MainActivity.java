@@ -16,15 +16,18 @@ public final class MainActivity extends Activity {
     private CodexService service;
     private boolean pageReady,bound;
     private String imageDraftKey="";
+    private String exportImageId="";
+    private android.net.Uri pendingExportUri;
     private java.util.List<android.net.Uri> pendingImages;
     private final CodexService.Listener listener=this::deliver;
     private final ServiceConnection connection=new ServiceConnection(){
-        public void onServiceConnected(ComponentName name,IBinder binder){service=((CodexService.LocalBinder)binder).service();service.listen(listener);if(pendingImages!=null){service.importImages(pendingImages,imageDraftKey);pendingImages=null;}if(pageReady)deliver(Json.obj("type","state","state",service.snapshot()));}
+        public void onServiceConnected(ComponentName name,IBinder binder){service=((CodexService.LocalBinder)binder).service();service.listen(listener);if(pendingImages!=null){service.importImages(pendingImages,imageDraftKey);pendingImages=null;}if(pendingExportUri!=null){service.exportImage(pendingExportUri,exportImageId);pendingExportUri=null;exportImageId="";}if(pageReady)deliver(Json.obj("type","state","state",service.snapshot()));}
         public void onServiceDisconnected(ComponentName name){service=null;}
     };
     @Override public void onCreate(Bundle saved){
         super.onCreate(saved);
         if(saved!=null)imageDraftKey=saved.getString("imageDraftKey","");
+        if(saved!=null){exportImageId=saved.getString("exportImageId","");String pending=saved.getString("pendingExportUri","");if(!pending.isEmpty())pendingExportUri=android.net.Uri.parse(pending);}
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},4);
         Intent intent=new Intent(this,CodexService.class);startForegroundService(intent);bound=bindService(intent,connection,BIND_AUTO_CREATE);
         web=new WebView(this);web.setBackgroundColor(0xff17181b);
@@ -36,6 +39,10 @@ public final class MainActivity extends Activity {
                 String url=r.getUrl().toString();
                 if(!url.startsWith(ORIGIN))return empty();
                 String path=r.getUrl().getPath();if(path==null||path.contains(".."))return empty();
+                if(path.startsWith("/images/")){
+                    if(!path.matches("/images/[a-f0-9-]{36}/original")||service==null)return empty();
+                    try{Attachments.Original original=service.originalImage(path.split("/")[2]);WebResourceResponse response=new WebResourceResponse(original.mime(),null,new ByteArrayInputStream(original.bytes()));response.setResponseHeaders(java.util.Map.of("Cache-Control","no-store","X-Content-Type-Options","nosniff"));return response;}catch(Exception|OutOfMemoryError e){return empty();}
+                }
                 if(path.equals("/"))path="/index.html";
                 try{String mime=path.endsWith(".js")?"application/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":"text/html";
                     WebResourceResponse res=new WebResourceResponse(mime,"UTF-8",getAssets().open("ui"+path));
@@ -48,7 +55,13 @@ public final class MainActivity extends Activity {
         setContentView(web);web.loadUrl(ORIGIN);
     }
     private WebResourceResponse empty(){return new WebResourceResponse("text/plain","UTF-8",new ByteArrayInputStream(new byte[0]));}
-    private void deliver(JSONObject event){runOnUiThread(()->{if(pageReady&&web!=null)web.evaluateJavascript("window.receive("+event.toString()+")",null);});}
+    private void deliver(JSONObject event){runOnUiThread(()->{
+        if(event.optString("type").equals("imageExportReady")){
+            if(!exportImageId.isEmpty())return;
+            exportImageId=event.optString("id");try{Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType(event.optString("mime"));intent.putExtra(Intent.EXTRA_TITLE,event.optString("name","图片.png"));startActivityForResult(intent,22);}catch(Exception e){exportImageId="";deliver(Json.obj("type","toast","message","无法打开保存位置选择器"));}return;
+        }
+        if(pageReady&&web!=null)web.evaluateJavascript("window.receive("+event.toString()+")",null);
+    });}
     public final class Bridge {
         @JavascriptInterface public void action(String json){
             try{JSONObject a=new JSONObject(json);if(a.optString("type").equals("copy")){android.content.ClipboardManager c=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);c.setPrimaryClip(ClipData.newPlainText("Codex",a.optString("text")));return;}
@@ -61,8 +74,10 @@ public final class MainActivity extends Activity {
             }catch(Exception e){deliver(Json.obj("type","toast","message","请求无法解析"));}
         }
     }
-    @Override public void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK||data==null)return;if(requestCode==20&&service!=null&&data.getData()!=null)service.exportLogs(data.getData());if(requestCode==21){java.util.List<android.net.Uri> uris=new java.util.ArrayList<>();if(data.getClipData()!=null){for(int i=0;i<Math.min(4,data.getClipData().getItemCount());i++)uris.add(data.getClipData().getItemAt(i).getUri());}else if(data.getData()!=null)uris.add(data.getData());if(service!=null)service.importImages(uris,imageDraftKey);else pendingImages=uris;}}
-    @Override public void onSaveInstanceState(Bundle out){out.putString("imageDraftKey",imageDraftKey);super.onSaveInstanceState(out);}
+    @Override public void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);
+        if(requestCode==22){if(resultCode==RESULT_OK&&data!=null&&data.getData()!=null){if(service!=null){service.exportImage(data.getData(),exportImageId);exportImageId="";}else pendingExportUri=data.getData();}else exportImageId="";return;}
+        if(resultCode!=RESULT_OK||data==null)return;if(requestCode==20&&service!=null&&data.getData()!=null)service.exportLogs(data.getData());if(requestCode==21){java.util.List<android.net.Uri> uris=new java.util.ArrayList<>();if(data.getClipData()!=null){for(int i=0;i<Math.min(4,data.getClipData().getItemCount());i++)uris.add(data.getClipData().getItemAt(i).getUri());}else if(data.getData()!=null)uris.add(data.getData());if(service!=null)service.importImages(uris,imageDraftKey);else pendingImages=uris;}}
+    @Override public void onSaveInstanceState(Bundle out){out.putString("imageDraftKey",imageDraftKey);out.putString("exportImageId",exportImageId);if(pendingExportUri!=null)out.putString("pendingExportUri",pendingExportUri.toString());super.onSaveInstanceState(out);}
     @Override public void onBackPressed(){web.evaluateJavascript("window.back()",null);}
     @Override public void onResume(){super.onResume();if(service!=null)service.update();}
     @Override public void onDestroy(){pageReady=false;if(service!=null)service.unlisten(listener);if(bound)unbindService(connection);if(web!=null){web.removeJavascriptInterface("Android");web.destroy();web=null;}super.onDestroy();}

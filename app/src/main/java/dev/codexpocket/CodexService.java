@@ -56,12 +56,28 @@ public final class CodexService extends Service {
                 if(inline!=null)try{bytes=RemoteImages.decodeInline(inline);}catch(java.io.IOException ex){if(path.isEmpty())throw ex;bytes=engine.readImage(path);}else bytes=engine.readImage(path);
                 JSONObject preview=attachments().add(bytes);JSONObject current=remoteImage(chatId,messageId,index);
                 if(current==null||!path.equals(current.optString("path"))){attachments().remove(preview.optString("id"));return;}
-                for(String key:new String[]{"id","preview","width","height"})store.put(current,key,preview.opt(key));store.put(current,"status","ready");
-                if(open)event(Json.obj("type","remoteImageOpened","chatId",chatId,"name",current.optString("name"),"preview",attachments().fullPreview(current.optString("id"))));
+                for(String key:new String[]{"id","preview","width","height","original","mime"})store.put(current,key,preview.opt(key));store.put(current,"status","ready");
+                if(open)imageReady(chatId,messageId,index,current);
             }catch(Exception|OutOfMemoryError ex){JSONObject current=remoteImage(chatId,messageId,index);if(current!=null&&path.equals(current.optString("path")))store.put(current,"status","failed");if(open)event(Json.obj("type","toast","message","图片加载失败，请检查服务器连接后重试"));}
             finally{imageJobs.remove(job);update();}
         });
     }
+    private void imageReady(String chatId,String messageId,int index,JSONObject image){
+        event(Json.obj("type","remoteImageOpened","chatId",chatId,"messageId",messageId,"index",index,"name",image.optString("name"),"url","https://app.codexpocket.local/images/"+image.optString("id")+"/original"));
+    }
+    Attachments.Original originalImage(String id)throws Exception{return attachments().original(id);}
+    private void prepareImageSave(JSONObject action){imageWorkers.submit(()->{try{
+        JSONObject image=remoteImage(action.optString("chatId"),action.optString("messageId"),action.optInt("index",-1));if(image==null)throw new java.io.IOException("图片不存在");
+        String id=image.optString("id");
+        if(!attachments().hasOriginal(id)){
+            String path=image.optString("path");if(path.isEmpty())throw new java.io.IOException("当前仅有预览缓存，请刷新远程记录重新接收原图");
+            JSONObject chat=store.chat(action.optString("chatId"));if(chat==null)throw new java.io.IOException("聊天不存在");CodexEngine e=engine(chat.optString("hostId"));e.connect();JSONObject preview=attachments().add(e.readImage(path));
+            for(String key:new String[]{"id","preview","width","height","original","mime"})store.put(image,key,preview.opt(key));id=image.optString("id");
+        }
+        Attachments.Original original=attachments().original(id);
+        event(Json.obj("type","imageExportReady","id",id,"mime",original.mime(),"name",ImageFormat.fileName(image.optString("name"),original.mime())));
+    }catch(Exception|OutOfMemoryError ex){event(Json.obj("type","toast","message","无法准备原图："+ex.getMessage()));}});}
+    void exportImage(Uri uri,String id){imageWorkers.submit(()->{try{Attachments.Original image=attachments().original(id);try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选位置");out.write(image.bytes());}event(Json.obj("type","toast","message","原图已保存"));}catch(Exception|OutOfMemoryError ex){event(Json.obj("type","toast","message","原图保存失败："+ex.getMessage()));}});}
     String initError;
     private volatile Listener listener;
     private boolean updatePending;
@@ -133,6 +149,7 @@ public final class CodexService extends Service {
         if(type.equals("removeImage")){try{attachments().remove(a.optString("id"));}catch(Exception ignored){}return;}
         if(type.equals("testConnection")){testConnection(a);return;}
         if(type.equals("cancelConnectionTest")){cancelTests();return;}
+        if(type.equals("saveRemoteImage")){prepareImageSave(a);return;}
         if(type.equals("trust")){
             String id=a.optString("hostId");CodexEngine e=id.startsWith("test-")?tests.get(id.substring(5)):engines.get(id);if(e!=null)e.trust(a.optString("fingerprint"),a.optBoolean("accept"));trustPrompts.remove(id);update();return;
         }
@@ -171,7 +188,7 @@ public final class CodexService extends Service {
                     case "approvalMode":store.approvalMode(chatId,a.optString("value"));break;
                     case "loadRemoteImage":case "viewRemoteImage":{
                         JSONObject c=store.chat(chatId);if(c==null)throw new Exception("聊天不存在");String messageId=a.optString("messageId");int index=a.optInt("index",-1);JSONObject image=remoteImage(chatId,messageId,index);if(image==null)throw new Exception("图片不存在");
-                        if(type.equals("viewRemoteImage")&&!image.optString("id").isEmpty())try{event(Json.obj("type","remoteImageOpened","chatId",chatId,"name",image.optString("name"),"preview",attachments().fullPreview(image.optString("id"))));break;}catch(Exception ignored){}
+                        if(type.equals("viewRemoteImage")&&attachments().hasOriginal(image.optString("id"))){imageReady(chatId,messageId,index,image);break;}
                         if(image.optBoolean("inline")&&image.optString("path").isEmpty())throw new Exception("图片缓存已过期，请刷新远程记录重新接收");
                         CodexEngine e=engine(c.optString("hostId"));e.connect();loadRemoteImage(e,chatId,messageId,index,type.equals("viewRemoteImage"),null);break;
                     }

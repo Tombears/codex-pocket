@@ -33,6 +33,7 @@ final class Store {
             cipher.init(Cipher.DECRYPT_MODE,key,new GCMParameterSpec(128,Arrays.copyOfRange(raw,0,12)));
             data=new JSONObject(new String(cipher.doFinal(Arrays.copyOfRange(raw,12,raw.length)),java.nio.charset.StandardCharsets.UTF_8));
         }
+        boolean migrated=RemoteDefaults.migrate(data);
         // A process restart cannot preserve an SSH channel or pending request ids.
         JSONArray chats=data.getJSONArray("chats");
         for(int i=0;i<chats.length();i++){
@@ -41,6 +42,7 @@ final class Store {
             JSONArray ms=chat.optJSONArray("messages");
             if(ms!=null)for(int j=0;j<ms.length();j++)if(ms.getJSONObject(j).optString("kind").equals("approval"))ms.getJSONObject(j).put("resolved",true);
         }
+        if(migrated)flush();
     }
     synchronized void flush(){
         try {
@@ -73,7 +75,7 @@ final class Store {
                 h.put(k,v);
             }
         }
-        h.put("id",id);h.put("port",input.optInt("port",22));
+        h.put("id",id);h.put("port",input.optInt("port",22));h.put("pathDefaultsVersion",1);
         if(h.optString("name").isBlank()||h.optString("host").isBlank()||h.optString("user").isBlank())throw new Exception("请填写名称、地址和用户名");
         if(h.optInt("port")<1||h.optInt("port")>65535)throw new Exception("端口应为 1–65535");
         if(!Set.of("password","key").contains(h.optString("auth")))throw new Exception("请选择认证方式");

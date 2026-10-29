@@ -47,7 +47,7 @@ public final class CodexService extends Service {
     JSONObject snapshot(){
         if(store==null)return Json.obj("error",initError);
         JSONObject out=store.snapshot(),connections=new JSONObject();
-        for(var e:engines.entrySet())try{connections.put(e.getKey(),Json.obj("status",e.getValue().status,"busyChat",e.getValue().busyChat));}catch(Exception ignored){}
+        for(var e:engines.entrySet())try{ConnectionProgress.Snapshot progress=e.getValue().connection.snapshot();connections.put(e.getKey(),Json.obj("status",progress.status(),"phase",progress.phase(),"error",progress.error(),"cwd",e.getValue().runtimeCwd,"codex",e.getValue().runtimeCodex,"busyChat",e.getValue().busyChat));}catch(Exception ignored){}
         try{out.put("connections",connections);out.put("trustPrompts",new JSONArray(trustPrompts.values()));}catch(Exception ignored){}return out;
     }
     private CodexEngine engine(String id){if(store.host(id)==null)throw new IllegalArgumentException("虚拟机不存在");return engines.computeIfAbsent(id,h->new CodexEngine(this,h));}
@@ -92,7 +92,7 @@ public final class CodexService extends Service {
                     default:throw new IllegalArgumentException("未知操作");
                 }
                 event(Json.obj("type","actionComplete","action",type,"chatId",chatId));update();
-            }catch(Exception e){event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?"操作失败":e.getMessage()));update();}
+            }catch(Exception|LinkageError e){event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
         });
     }
     @Override public void onDestroy(){for(CodexEngine e:engines.values())e.close();if(store!=null)store.flush();workers.shutdownNow();super.onDestroy();}

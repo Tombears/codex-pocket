@@ -29,11 +29,13 @@
 - 停止当前任务、断开单台或全部服务器连接。
 - 深色默认，可切换浅色；手机抽屉侧栏，大屏双栏布局。
 - Android 前台服务维持连接并提示待审批事项。
+- 自动识别远程用户主目录与 Codex 安装路径；路径覆盖为可选高级设置。
+- SSH 到 Codex 握手的连接总超时为 30 秒，显示当前阶段，可取消；错误保留在连接设置中。
 - 密码、私钥和聊天记录统一使用 Android Keystore 生成的 AES-GCM 密钥加密保存；不进入网页初始化数据。关闭系统备份。
 
 ## 安装与使用
 
-支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；当前版本为 [v0.1.0 公开测试版](https://github.com/Tombears/codex-pocket/releases/tag/v0.1.0)，安装文件为 `CodexPocket-0.1.0-debug.apk`，同页提供 `SHA256SUMS.txt` 校验文件。
+支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.1.1 版支持自动识别路径和 30 秒连接总超时，同页提供 `SHA256SUMS.txt` 校验文件。
 
 也可以自行构建，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-debug-and-reports`。下载 Actions 构建产物可能需要登录 GitHub。
 
@@ -49,11 +51,13 @@ codex login --device-auth
 
 按照命令输出，在手机浏览器中完成账号登录。账号需要具备 Codex 使用权限；设备代码登录可能需要在 ChatGPT 安全设置中启用。API key 登录也可以事先在服务器上配置；应用不要求手机再保存 OpenAI API key。
 
-准备一个真实存在的工作目录，例如 `/home/ubuntu/project`。建议先用普通 SSH 客户端确认用户名、端口和凭据可正常登录。
+工作目录默认使用远程登录用户的主目录，无需填写路径；如需指定项目目录，可在高级设置中填写真实存在的 Linux 绝对路径。建议先用普通 SSH 客户端确认用户名、端口和凭据可正常登录。
 
-打开应用 → 添加虚拟机 → 填写名称、地址、端口、用户名、认证方式、工作目录、Codex 路径 → 保存 → 连接。首次连接先在云控制台核对主机指纹，确认后信任。
+打开应用 → 添加虚拟机 → 填写名称、地址、端口、用户名和认证凭据 → 保存 → 连接。工作目录和 Codex 路径默认自动识别，无需打开高级设置。首次连接先在云控制台核对主机指纹，确认后信任。连接过程总计 30 秒超时，包括等待指纹确认；超时后可重新连接。
 
-连接使用 `bash -lc` 启动 Codex，自动将 `$HOME/.local/bin`、`$HOME/.npm-global/bin` 和 `/usr/local/bin` 加入 PATH。如果通过 nvm 安装，且登录 shell 找不到 Codex，请填写完整可执行路径。启动脚本不要向 stdout 打印欢迎横幅；stdout 用于 JSON 协议。
+连接使用 `bash -lc` 启动 Codex，优先查找服务器 PATH，并搜索用户常用安装目录和 nvm 的 Node 安装目录。默认目录使用服务器 `$HOME`；启动时会同步显示识别到的实际目录。仍可在高级设置覆盖路径。启动脚本不要向 stdout 打印欢迎横幅；stdout 用于 JSON 协议。
+
+旧版模板默认的 `/home/ubuntu` 会迁移为自动识别。显式配置的其他项目路径，以及已经存在的远程聊天路径会保留。
 
 不需要开放除 SSH 之外的 Codex HTTP/WebSocket 端口，不需要安装额外桥接服务。SSH 使用自定义端口时同步修改配置。
 
@@ -117,13 +121,13 @@ Linux CI 安装浏览器时使用 `npx playwright install --with-deps chromium`�
 
 ## 验证记录
 
-已完成 debug APK 构建；JSON-RPC 回包关联、通知与审批流不阻塞读取、错误响应、EOF 中断、远程启动命令参数校验共 5 项单元测试。浏览器以原生桥接替身验证了 11 类界面流程，覆盖 360/412 像素手机布局、分组/搜索、新建会话的服务器和目录归属、发送目标、消息 HTML 转义、审批归属、主题、凭据表单、绝对路径校验及主机信任取消。
+0.1.1 本地验证通过 13 项单元测试，包括原有 JSON-RPC 用例、固定 30 秒总超时、取消后旧回调隔离、UTF-8 错误缓存和自动路径迁移。浏览器以原生桥接替身验证了 14 类界面流程，新增连接阶段/取消、持久错误显示和无需填写路径的 root 连接表单。
 
 Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标及本地界面必须启用 JavaScript；JavaScript 仅在受限本地资源域使用，远程消息均转义后渲染。
 
 协议字段对照本机 Codex CLI 0.159.0 生成的稳定 JSON Schema，并参考 OpenAI Docs。不同服务器版本可能存在协议差异。
 
-**没有使用你的真实服务器或 SSH 凭据，尚未完成 Android 真机上的端到端 SSH/Codex 联调。** 浏览器预览中的地址和聊天标题为测试数据，APK 首次安装为空工作区。
+已使用用户授权的本地密钥，对真实 Linux 服务器上的 Codex CLI 0.163.0 完成 SSH 认证、无交互启动和协议握手检查，未将服务器地址或私钥写入仓库。**这仍不能替代 Android 真机上的端到端测试。** 浏览器预览中的地址和聊天标题为测试数据，APK 首次安装为空工作区。
 
 ## 上游资料与依赖
 
@@ -134,7 +138,7 @@ Android Lint 无错误，剩余两项提示为首版 targetSdk 34 兼容目标�
 - [Bouncy Castle](https://www.bouncycastle.org/licence.html)：现代 SSH 密钥算法支持，Bouncy Castle 许可。
 - [Android desugar libraries](https://github.com/google/desugar_jdk_libs)：较旧 Android 的 Java API 支持，采用上游许可证。
 
-版本：0.1.0；日期：2026-10-29（Asia/Shanghai）。
+版本：0.1.1；日期：2026-10-29（Asia/Shanghai）。
 
 ## 开源许可
 

@@ -56,6 +56,7 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  await page.setViewportSize({width:360,height:740});
  await page.locator('header [data-action=sidebar]').click();await page.locator('.settings-row').click();await page.locator('#dialog [data-action=addHost]').click();
  await page.locator('#auth-select').selectOption('password');assert.equal(await page.locator('#password-field').isVisible(),true);assert.equal(await page.locator('#key-fields').isVisible(),false);
+ await page.locator('#host-form .advanced-paths summary').click();
  await page.locator('input[name=name]').fill('新虚拟机');await page.locator('input[name=host]').fill('192.0.2.30');await page.locator('input[name=password]').fill('test-only');await page.locator('input[name=cwd]').fill('relative');await page.locator('#save-host').click();
  assert.ok((await page.locator('#form-error').textContent()).includes('绝对路径'));
  await page.locator('input[name=cwd]').fill('/srv/work');await page.locator('#save-host').click();
@@ -64,7 +65,25 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  await page.locator('.dialog-head [data-action=closeDialog]').click();
  await page.evaluate(()=>window.receive({type:'trust',hostId:'h1',name:'开发服务器',address:'192.0.2.10',fingerprint:'SHA256:test'}));
  await page.locator('[data-action=rejectTrust]').click();assert.equal(await page.evaluate(()=>window.commands.at(-1).accept),false);
+ // Connecting must identify its stage and keep an immediate cancel action available.
+ await page.evaluate(()=>{document.body.classList.remove('sidebar-open');window.fixture.connections.h1={status:'connecting',phase:'连接 SSH 并验证身份'};window.receive({type:'state',state:window.fixture});});
+ assert.ok((await page.locator('.connection-progress').innerText()).includes('连接 SSH'));
+ assert.equal(await page.locator('.welcome-host [data-action=disconnect]').isEnabled(),true);
+ await page.locator('.welcome-host [data-action=disconnect]').click();assert.equal(await page.evaluate(()=>window.commands.at(-1).type),'disconnect');
+ // Failure details must remain visible after the transient toast disappears.
+ await page.evaluate(()=>{window.fixture.connections.h1={status:'error',phase:'等待 Codex 握手',error:'工作目录不存在或无权限：/missing'};window.receive({type:'state',state:window.fixture});});
+ assert.ok((await page.locator('.connection-problem').innerText()).includes('/missing'));
+ await page.locator('.connection-problem [data-action=hostInfo]').click();assert.ok((await page.locator('#dialog .connection-problem').innerText()).includes('/missing'));await page.locator('.dialog-head [data-action=closeDialog]').click();
+ // A root connection should work with automatic, blank paths and no advanced input.
+ await page.locator('header [data-action=sidebar]').click();await page.locator('.settings-row').click();await page.locator('#dialog [data-action=addHost]').click();
+ await page.locator('#host-form input[name=user]').fill('root');await page.locator('#host-form input[name=user]').dispatchEvent('change');
+ assert.equal(await page.locator('#host-form input[name=cwd]').inputValue(),'');
+ assert.equal(await page.locator('#host-form input[name=codex]').inputValue(),'');
+ assert.equal(await page.locator('#host-form input[name=cwd]').isVisible(),false);
+ await page.locator('#host-form input[name=name]').fill('自动路径测试');await page.locator('#host-form input[name=host]').fill('192.0.2.40');await page.locator('#auth-select').selectOption('password');await page.locator('#host-form input[name=password]').fill('test-only');await page.locator('#save-host').click();
+ assert.ok(await page.evaluate(()=>window.commands.some(a=>a.type==='saveHost'&&a.host.user==='root'&&a.host.cwd===''&&a.host.codex==='')));
+ await page.locator('.dialog-head [data-action=closeDialog]').click();
  assert.deepEqual(errors,[],'no browser JS errors');
- fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation'],errors},null,2));
- console.log('UI checks passed: 11 workflows; screenshots saved.');await browser.close();server.close();
+ fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation','connecting stage and cancellation','persistent connection errors','root default directory'],errors},null,2));
+ console.log('UI checks passed: 14 workflows; screenshots saved.');await browser.close();server.close();
 })().catch(e=>{console.error(e);server.close();process.exit(1);});

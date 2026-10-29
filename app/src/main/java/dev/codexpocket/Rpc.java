@@ -32,9 +32,12 @@ final class Rpc implements AutoCloseable {
         },"codex-rpc-reader"); reader.setDaemon(true);reader.start();
     }
     JSONObject request(String method,JSONObject params)throws Exception{
+        return request(method,params,60);
+    }
+    JSONObject request(String method,JSONObject params,long timeoutSeconds)throws Exception{
         long id=seq.incrementAndGet();CompletableFuture<JSONObject> f=new CompletableFuture<>();
         if(closed)throw new IOException("连接已关闭");pending.put(Long.toString(id),f);
-        try{send(Json.obj("id",id,"method",method,"params",params));return f.get(60,TimeUnit.SECONDS);}
+        try{send(Json.obj("id",id,"method",method,"params",params));return f.get(timeoutSeconds,TimeUnit.SECONDS);}
         catch(ExecutionException e){throw new IOException(e.getCause().getMessage(),e.getCause());}
         catch(TimeoutException e){throw new IOException("Codex 响应超时："+method,e);}
         finally{pending.remove(Long.toString(id));}

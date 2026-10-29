@@ -3,7 +3,7 @@ android {
     namespace 'dev.codexpocket'
     compileSdk 35
     buildToolsVersion '35.0.0'
-    defaultConfig { applicationId 'dev.codexpocket'; minSdk 26; targetSdk 34; versionCode 1; versionName '0.1.0' }
+    defaultConfig { applicationId 'dev.codexpocket'; minSdk 26; targetSdk 34; versionCode 2; versionName '0.1.1' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17; coreLibraryDesugaringEnabled true }
     buildTypes { release { minifyEnabled false } }
     packaging { resources.excludes += ['META-INF/versions/**', 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'] }

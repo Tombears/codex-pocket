@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 final class CodexEngine {
     final String hostId;
@@ -19,19 +20,33 @@ final class CodexEngine {
     private final ConcurrentHashMap<String,Pending> approvals=new ConcurrentHashMap<>();
     private volatile CompletableFuture<Boolean> trust;
     private volatile String candidateFingerprint;
-    volatile String status="offline";
+    final ConnectionProgress connection=new ConnectionProgress();
+    private final ReentrantLock connectLock=new ReentrantLock();
+    private static final ScheduledExecutorService DEADLINES=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"ssh-connect-deadline");t.setDaemon(true);return t;});
+    private volatile ScheduledFuture<?> watchdog;
     volatile String busyChat="";
     private volatile String turnId="";
     private volatile boolean closing;
-    private volatile String stderr="";
+    private final StderrTail stderr=new StderrTail(4000);
+    volatile String runtimeCwd="",runtimeCodex="";
     record Pending(Object id,String method,JSONObject params,String chatId){}
     CodexEngine(CodexService owner,String hostId){this.owner=owner;this.hostId=hostId;this.store=owner.store;}
-    private void state(String s){status=s;owner.update();}
-    synchronized void connect()throws Exception{
-        if(rpc!=null&&ssh!=null&&ssh.isConnected()&&channel!=null&&channel.isConnected())return;
-        close();closing=false;stderr="";state("connecting");
-        JSONObject h=store.host(hostId);if(h==null)throw new IOException("虚拟机不存在");
+    private void phase(long attempt,String label)throws IOException{
+        if(!connection.stage(attempt,label))throw new IOException("连接已取消或超时");owner.update();
+    }
+    private void requireActive(long attempt)throws IOException{if(!connection.active(attempt))throw new IOException("连接已取消或超时");}
+    void connect()throws Exception{
+        if(!connectLock.tryLock())throw new IOException("该虚拟机正在连接，可先取消连接再重试");
+        long attempt=0;
         try{
+            if(rpc!=null&&ssh!=null&&ssh.isConnected()&&channel!=null&&channel.isConnected()&&connection.snapshot().status().equals("online"))return;
+            close();closing=false;stderr.clear();runtimeCwd="";runtimeCodex="";attempt=connection.begin();owner.update();
+            final long token=attempt;
+            watchdog=DEADLINES.scheduleAtFixedRate(()->{
+                if(connection.expire(token)){closing=true;owner.trustPrompts.remove(hostId);owner.update();cleanupTransport();}
+            },1,1,TimeUnit.SECONDS);
+            JSONObject h=store.host(hostId);if(h==null)throw new IOException("虚拟机不存在");
+            phase(attempt,"加载 SSH 密钥");
             // Use the full BC provider for Ed25519/modern OpenSSH keys on Android.
             synchronized(CodexEngine.class){
                 if(!(Security.getProvider("BC") instanceof org.bouncycastle.jce.provider.BouncyCastleProvider)){
@@ -39,6 +54,11 @@ final class CodexEngine {
                 }
             }
             JSch.setConfig("prefer_known_host_key_types","no");
+            // Android does not expose all desktop JDK EdEC/XDH APIs.
+            JSch.setConfig("xdh","com.jcraft.jsch.bc.XDH");
+            JSch.setConfig("keypairgen.eddsa","com.jcraft.jsch.bc.KeyPairGenEdDSA");
+            JSch.setConfig("ssh-ed25519","com.jcraft.jsch.bc.SignatureEd25519");
+            JSch.setConfig("ssh-ed448","com.jcraft.jsch.bc.SignatureEd448");
             JSch jsch=new JSch();
             jsch.setHostKeyRepository(new HostKeyRepository(){
                 public int check(String name,byte[] key){
@@ -46,10 +66,11 @@ final class CodexEngine {
                         String fp="SHA256:"+android.util.Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(key),android.util.Base64.NO_WRAP|android.util.Base64.NO_PADDING);
                         String saved=h.optString("fingerprint");
                         if(!saved.isEmpty())return saved.equals(fp)?OK:CHANGED;
+                        phase(token,"等待确认服务器指纹");
                         trust=new CompletableFuture<>();candidateFingerprint=fp;
                         owner.event(Json.obj("type","trust","hostId",hostId,"name",h.optString("name"),"address",name,"fingerprint",fp));
-                        boolean yes=trust.get(120,TimeUnit.SECONDS);trust=null;
-                        if(yes){store.put(h,"fingerprint",fp);store.flush();return OK;}
+                        boolean yes=trust.get(30,TimeUnit.SECONDS);trust=null;owner.trustPrompts.remove(hostId);
+                        if(yes){phase(token,"验证 SSH 身份");store.put(h,"fingerprint",fp);store.flush();return OK;}
                     }catch(Exception ignored){}return NOT_INCLUDED;
                 }
                 public void add(HostKey key,UserInfo ui){}
@@ -68,24 +89,40 @@ final class CodexEngine {
             ssh.setConfig("StrictHostKeyChecking","yes");
             ssh.setConfig("PreferredAuthentications",h.optString("auth").equals("key")?"publickey":"password");
             if(h.optString("auth").equals("password"))ssh.setPassword(h.optString("password"));
-            ssh.setServerAliveInterval(15000);ssh.setServerAliveCountMax(3);ssh.setTimeout(30000);ssh.connect(150000);
+            phase(attempt,"连接 SSH 并验证身份");
+            ssh.setServerAliveInterval(15000);ssh.setServerAliveCountMax(3);ssh.setTimeout(30000);ssh.connect(30000);
+            requireActive(attempt);phase(attempt,"自动识别目录与 Codex");
             channel=(ChannelExec)ssh.openChannel("exec");
             channel.setCommand(Json.command(h.optString("cwd"),h.optString("codex","codex")));
             channel.setPty(false);
             InputStream stdout=channel.getInputStream();OutputStream stdin=channel.getOutputStream();
-            channel.setErrStream(new OutputStream(){public synchronized void write(int b){stderr=(stderr+(char)b);if(stderr.length()>4000)stderr=stderr.substring(stderr.length()-4000);}});
-            channel.connect(15000);
-            rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing){fail(e);close();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.1.0")));
+            channel.setErrStream(stderr);
+            channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
+            rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.1.1")),30);
+            requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
-            state("online");
-        }catch(Exception e){close();state("error");throw new IOException(errorMessage(e),e);}
+            for(String line:stderr.text().split("\n")){
+                if(line.startsWith("__CP_CWD__="))runtimeCwd=line.substring(11);
+                if(line.startsWith("__CP_BIN__="))runtimeCodex=line.substring(11);
+            }
+            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.update();
+        }catch(Exception|LinkageError e){
+            String label=connection.snapshot().phase();
+            String message=(label.isEmpty()?"":label+"失败：")+errorMessage(e);
+            if(connection.current(attempt)){closing=true;connection.fail(attempt,message);owner.update();cleanupTransport();}
+            throw new IOException(message,e);
+        }finally{
+            ScheduledFuture<?> timer=watchdog;watchdog=null;if(timer!=null)timer.cancel(false);
+            connectLock.unlock();
+        }
     }
-    private String errorMessage(Exception e){
+    private String errorMessage(Throwable e){
         String message=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();
         if(message.toLowerCase(Locale.ROOT).contains("hostkey")||message.contains("HostKey"))return "SSH 主机密钥未获信任或已发生变化，请在云控制台核对后再处理";
         if(message.contains("Auth fail"))return "SSH 登录失败，请检查用户名、密码或私钥";
-        if(!stderr.isBlank())message+="\n"+stderr;
+        if(e instanceof LinkageError)return "当前 Android 加密组件不兼容（"+e.getClass().getSimpleName()+"）："+message;
+        if(!stderr.text().isBlank())message+="\n"+stderr.text();
         return message;
     }
     void trust(String fingerprint,boolean yes){CompletableFuture<Boolean> f=trust;if(f!=null&&Objects.equals(candidateFingerprint,fingerprint))f.complete(yes);}
@@ -96,17 +133,21 @@ final class CodexEngine {
         try{
             String remote=chat.optString("remoteId");
             JSONObject h=store.host(hostId);
-            JSONObject params=Json.obj("cwd",chat.optString("cwd"),"approvalPolicy","on-request","approvalsReviewer","user","sandbox","workspace-write");
+            JSONObject params=Json.obj("approvalPolicy","on-request","approvalsReviewer","user","sandbox","workspace-write");
+            if(!chat.optString("cwd").isBlank())params.put("cwd",chat.optString("cwd"));
             if(!remote.isEmpty())params.put("threadId",remote);
             JSONObject result;
             if(!loaded.contains(chatId)){
                 result=rpc.request(remote.isEmpty()?"thread/start":"thread/resume",params);
-                remote=result.getJSONObject("thread").getString("id");store.put(chat,"remoteId",remote);loaded.add(chatId);
+                remote=result.getJSONObject("thread").getString("id");store.put(chat,"remoteId",remote);
+                String resolvedCwd=result.getJSONObject("thread").optString("cwd",runtimeCwd);
+                if(!resolvedCwd.isBlank())store.put(chat,"cwd",resolvedCwd);loaded.add(chatId);
             }
             store.message(chat,"user-"+UUID.randomUUID(),"user","text",text);
             if(chat.optString("title").equals("新聊天"))store.put(chat,"title",text.substring(0,Math.min(28,text.length())));
             store.put(chat,"updatedAt",System.currentTimeMillis());
-            JSONObject turnParams=Json.obj("threadId",remote,"input",new JSONArray().put(Json.obj("type","text","text",text)),"cwd",chat.optString("cwd"),"approvalPolicy","on-request");
+            JSONObject turnParams=Json.obj("threadId",remote,"input",new JSONArray().put(Json.obj("type","text","text",text)),"approvalPolicy","on-request");
+            if(!chat.optString("cwd").isBlank())turnParams.put("cwd",chat.optString("cwd"));
             String model=h.optString("model");if(!model.isBlank())turnParams.put("model",model);
             JSONObject r=rpc.request("turn/start",turnParams);
             // A very short turn can complete before the request response is read.
@@ -219,13 +260,17 @@ final class CodexEngine {
         }
         store.put(c,"messages",new JSONArray());for(int i=0;i<items.length();i++)recordItem(c,items.getJSONObject(i),true);store.put(c,"needsHistory",false);
     }
-    private void fail(Exception e){String id=busyChat;if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){store.put(c,"status","interrupted");store.message(c,"lost-"+UUID.randomUUID(),"system","error",errorMessage(e)+"\n重新连接后可继续此会话；请先核对服务器上的执行结果。");}}else owner.event(Json.obj("type","toast","message",errorMessage(e)));state("error");}
+    private void fail(Exception e){String id=busyChat;if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){store.put(c,"status","interrupted");store.message(c,"lost-"+UUID.randomUUID(),"system","error",errorMessage(e)+"\n重新连接后可继续此会话；请先核对服务器上的执行结果。");}}else owner.event(Json.obj("type","toast","message",errorMessage(e)));connection.failCurrent(errorMessage(e));owner.update();}
     void close(){
+        connection.cancel();
+        ScheduledFuture<?> timer=watchdog;if(timer!=null)timer.cancel(false);
+        cleanupTransport();owner.update();
+    }
+    private void cleanupTransport(){
         owner.trustPrompts.remove(hostId);
         closing=true;CompletableFuture<Boolean> f=trust;if(f!=null)f.complete(false);trust=null;
         Rpc r=rpc;rpc=null;if(r!=null)r.close();if(channel!=null)channel.disconnect();if(ssh!=null)ssh.disconnect();channel=null;ssh=null;loaded.clear();
         String id=busyChat;busyChat="";turnId="";resolveAll(null);
         if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null&&c.optString("status").equals("working"))store.put(c,"status","interrupted");}
-        state("offline");
     }
 }

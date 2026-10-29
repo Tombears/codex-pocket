@@ -9,6 +9,11 @@ const host=()=>state.hosts.find(h=>h.id===hostId);
 const chat=()=>state.chats.find(c=>c.id===chatId);
 const connection=id=>state.connections?.[id]||{status:'offline',busyChat:''};
 const statusText=s=>({online:'已连接',offline:'未连接',connecting:'正在连接',error:'连接失败'}[s]||'未连接');
+function connectionNotice(con){
+  if(con.status==='connecting')return `<div class="connection-progress"><span class="pulse"></span>${esc(con.phase||'正在建立 SSH 连接')}</div>`;
+  if(con.error)return `<div class="connection-problem"><strong>连接未完成</strong><div>${esc(con.error)}</div><button class="text-button" data-action="hostInfo">查看连接设置</button></div>`;
+  return '';
+}
 function native(a){if(window.Android?.action)window.Android.action(JSON.stringify(a));else toast('浏览器仅用于界面预览；SSH 连接请安装安卓 APK');}
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5500);}
 function rememberDraft(){if(chatId)drafts.set(chatId,$('#prompt').value);}
@@ -31,8 +36,8 @@ function renderSidebar(){
 function renderHeader(){
   const h=host(),c=chat(),con=connection(hostId);
   $('#host-pill').innerHTML=icon('server')+esc(h?.name||'添加虚拟机');
-  $('#connection-status').innerHTML=`<span class="dot ${esc(con.status)}"></span>${statusText(con.status)}`;
-  $('#workspace-bar').innerHTML=icon('folder')+`<span>${esc(c?.cwd||h?.cwd||'你的服务器 · 你的工作空间')}</span>`;
+  $('#connection-status').innerHTML=`<span class="dot ${esc(con.status)}"></span>${esc(con.status==='connecting'?(con.phase||'正在连接'):statusText(con.status))}`;
+  $('#workspace-bar').innerHTML=icon('folder')+`<span>${esc(c?.cwd||connection(hostId).cwd||h?.cwd||'自动（服务器主目录）')}</span>`;
 }
 function welcomeHTML(){
   const h=host(),con=connection(hostId);
@@ -62,6 +67,12 @@ function messageHTML(m){
 function renderConversation(){
   const c=chat(),ms=c?.messages||[];const welcome=ms.length===0;
   $('#welcome').hidden=!welcome;if(welcome)$('#welcome').innerHTML=welcomeHTML();
+  if(welcome){
+    const con=connection(hostId),card=$('#welcome .welcome-host');
+    if(card)card.insertAdjacentHTML('afterend',connectionNotice(con));
+    const button=$('#welcome .connect-button');
+    if(button&&con.status==='connecting'){button.disabled=false;button.dataset.action='disconnect';button.textContent='取消连接';}
+  }
   const key=JSON.stringify([chatId,ms]);
   if(key!==lastMessages){
     const pane=$('#conversation'),bottom=pane.scrollHeight-pane.scrollTop-pane.clientHeight<90;
@@ -84,7 +95,7 @@ function renderComposer(){
   $('#send').disabled=!h||(!working&&(pendingSend.has(chatId)||!!con.busyChat||!$('#prompt').value.trim()));
   $('#prompt').disabled=!h;
   $('#prompt').placeholder=h?'告诉 Codex 你想做什么…':'先添加一台虚拟机，开始对话';
-  const hint=con.busyChat&&con.busyChat!==chatId?'这台虚拟机有其他聊天正在运行':pendingSend.has(chatId)?'正在连接并发送…':c?.status==='interrupted'?'连接已中断，可刷新远程记录后继续':h?`${h.name}  /  ${c?.cwd||h.cwd}`:'SSH 直连服务器，无需额外中转服务';
+  const hint=con.status==='error'?'连接失败，请查看连接设置中的错误详情':con.status==='connecting'?(con.phase||'正在建立 SSH 连接'):con.busyChat&&con.busyChat!==chatId?'这台虚拟机有其他聊天正在运行':pendingSend.has(chatId)?'正在连接并发送…':c?.status==='interrupted'?'连接已中断，可刷新远程记录后继续':h?`${h.name}  /  ${c?.cwd||con.cwd||h.cwd||'自动识别'}`:'SSH 直连服务器，无需额外中转服务';
   $('#composer-context').innerHTML=`<span class="${c?.status==='interrupted'?'warning':''}">${esc(hint)}</span>`;
 }
 function resize(){const t=$('#prompt');t.style.height='auto';t.style.height=Math.min(180,t.scrollHeight)+'px';}
@@ -92,20 +103,23 @@ function openDialog(kind,html){dialogKind=kind;$('#dialog-content').innerHTML=ht
 function head(title){return `<div class="dialog-head"><h2>${esc(title)}</h2><button class="icon" data-action="closeDialog" aria-label="关闭">${icon('close')}</button></div>`;}
 function closeDialog(){if(activeTrust){native({type:'trust',hostId:activeTrust.hostId,fingerprint:activeTrust.fingerprint,accept:false});activeTrust=null;}$('#dialog').close();dialogKind='';}
 function editor(id=''){
-  const h=state.hosts.find(x=>x.id===id)||{name:'',host:'',port:22,user:'ubuntu',cwd:'/home/ubuntu',codex:'codex',auth:'key'};
-  openDialog('host',`${head(id?'编辑虚拟机':'添加虚拟机')}<form id="host-form" data-id="${esc(id)}"><div class="dialog-body"><p class="dialog-description">每台 Linux 服务器都是独立工作区，拥有自己的聊天记录。</p><div class="field-grid"><label class="field full">工作区名称<input name="name" value="${esc(h.name)}" placeholder="例如：开发服务器" required maxlength="60"></label><label class="field">服务器地址<input name="host" value="${esc(h.host)}" placeholder="IP 或域名" required autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="field">SSH 端口<input name="port" type="number" value="${h.port}" required min="1" max="65535"></label><label class="field">登录用户名<input name="user" value="${esc(h.user)}" required autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="field">认证方式<select name="auth" id="auth-select"><option value="key" ${h.auth==='key'?'selected':''}>SSH 私钥</option><option value="password" ${h.auth==='password'?'selected':''}>密码</option></select></label><label class="field full" id="password-field" ${h.auth!=='password'?'hidden':''}>SSH 密码<input name="password" type="password" autocomplete="new-password" placeholder="${h.hasSecret?'已保存；留空保留原值':'输入 SSH 登录密码'}"></label><div class="full" id="key-fields" ${h.auth!=='key'?'hidden':''}><label class="field">SSH 私钥<textarea name="privateKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${h.hasSecret?'已保存；留空保留原值':'粘贴完整的 OpenSSH / PEM 私钥'}"></textarea></label><div class="space-8"></div><label class="field">私钥口令（可选）<input name="passphrase" type="password" autocomplete="new-password" placeholder="${h.hasSecret?'留空保留原值':'私钥的解密口令'}"></label></div><label class="field full">默认工作目录<input name="cwd" value="${esc(h.cwd)}" required placeholder="/home/ubuntu/project" autocomplete="off" autocapitalize="off" spellcheck="false"><small>目录须已存在；新聊天可以选择不同目录。</small></label><label class="field full">Codex 可执行文件<input name="codex" value="${esc(h.codex||'codex')}" required placeholder="codex 或 /home/ubuntu/.local/bin/codex" autocomplete="off" autocapitalize="off" spellcheck="false"><small>服务器需事先安装 Codex 并完成登录。</small></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary" type="submit" id="save-host">保存连接</button></div></form>`);
+  const h=state.hosts.find(x=>x.id===id)||{name:'',host:'',port:22,user:'ubuntu',cwd:'',codex:'',auth:'key'};
+  openDialog('host',`${head(id?'编辑虚拟机':'添加虚拟机')}<form id="host-form" data-id="${esc(id)}"><div class="dialog-body"><p class="dialog-description">每台 Linux 服务器都是独立工作区，拥有自己的聊天记录。</p><div class="field-grid"><label class="field full">工作区名称<input name="name" value="${esc(h.name)}" placeholder="例如：开发服务器" required maxlength="60"></label><label class="field">服务器地址<input name="host" value="${esc(h.host)}" placeholder="IP 或域名" required autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="field">SSH 端口<input name="port" type="number" value="${h.port}" required min="1" max="65535"></label><label class="field">登录用户名<input name="user" value="${esc(h.user)}" required autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="field">认证方式<select name="auth" id="auth-select"><option value="key" ${h.auth==='key'?'selected':''}>SSH 私钥</option><option value="password" ${h.auth==='password'?'selected':''}>密码</option></select></label><label class="field full" id="password-field" ${h.auth!=='password'?'hidden':''}>SSH 密码<input name="password" type="password" autocomplete="new-password" placeholder="${h.hasSecret?'已保存；留空保留原值':'输入 SSH 登录密码'}"></label><div class="full" id="key-fields" ${h.auth!=='key'?'hidden':''}><label class="field">SSH 私钥<textarea name="privateKey" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${h.hasSecret?'已保存；留空保留原值':'粘贴完整的 OpenSSH / PEM 私钥'}"></textarea></label><div class="space-8"></div><label class="field">私钥口令（可选）<input name="passphrase" type="password" autocomplete="new-password" placeholder="${h.hasSecret?'留空保留原值':'私钥的解密口令'}"></label></div><details class="full advanced-paths"><summary>高级路径设置（通常无需填写）</summary><label class="field full">默认工作目录<input name="cwd" value="${esc(h.cwd||'')}" placeholder="自动使用服务器用户主目录" autocomplete="off" autocapitalize="off" spellcheck="false"><small>留空自动识别；填写项目路径时目录须已存在。</small></label><label class="field full">Codex 可执行文件<input name="codex" value="${esc(h.codex||'')}" placeholder="自动查找 Codex，无需填写" autocomplete="off" autocapitalize="off" spellcheck="false"><small>自动搜索 PATH、常见安装目录及 nvm。服务器需已安装并登录 Codex。</small></label></details></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary" type="submit" id="save-host">保存连接</button></div></form>`);
 }
 function newChat(id=hostId){
   if(!state.hosts.length){editor();return;}
   const h=state.hosts.find(h=>h.id===id)||state.hosts[0];
-  openDialog('newChat',`${head('新建聊天')}<form id="chat-form"><div class="dialog-body"><p class="dialog-description">选择虚拟机与工作目录，开始一段独立的 Codex 会话。</p><div class="field-grid"><label class="field full">虚拟机<select name="hostId" id="new-host">${state.hosts.map(x=>`<option value="${esc(x.id)}" ${x.id===h.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label class="field full">工作目录<input name="cwd" id="new-cwd" value="${esc(h.cwd)}" required autocapitalize="off" spellcheck="false"></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary">创建聊天</button></div></form>`);
+  openDialog('newChat',`${head('新建聊天')}<form id="chat-form"><div class="dialog-body"><p class="dialog-description">选择虚拟机与工作目录，开始一段独立的 Codex 会话。</p><div class="field-grid"><label class="field full">虚拟机<select name="hostId" id="new-host">${state.hosts.map(x=>`<option value="${esc(x.id)}" ${x.id===h.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label class="field full">工作目录<input name="cwd" id="new-cwd" value="${esc(h.cwd||'')}" placeholder="自动使用服务器用户主目录" autocapitalize="off" spellcheck="false"></label></div><div id="form-error" class="dialog-error"></div></div><div class="dialog-actions"><button type="button" class="btn" data-action="closeDialog">取消</button><button class="btn primary">创建聊天</button></div></form>`);
 }
 function settings(){
-  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.1.0 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。Android 系统可能回收后台连接，首版不保证断网后任务继续运行。重新连接后可恢复会话上下文。</p></div>`);
+  openDialog('settings',`${head('设置')}<div class="dialog-body"><div class="settings-item"><div><strong>外观</strong><small>选择适合你的界面主题</small></div><div class="theme-choices"><button data-action="theme" data-value="dark" class="${state.theme==='dark'?'chosen':''}">深色</button><button data-action="theme" data-value="light" class="${state.theme==='light'?'chosen':''}">浅色</button></div></div><div class="settings-item"><div><strong>连接管理</strong><small>通过 SSH 直连 Linux 云服务器</small></div><button class="text-button" data-action="addHost">＋ 添加虚拟机</button></div>${state.hosts.map(h=>`<div class="host-card">${icon('server')}<div><strong>${esc(h.name)}</strong><small>${esc(h.user+'@'+h.host+':'+h.port)}</small></div><button class="icon" data-action="editHost" data-id="${esc(h.id)}" aria-label="编辑连接">${icon('edit')}</button></div>`).join('')}<div class="settings-title">数据与安全</div><div class="settings-item"><div><strong>本地加密存储</strong><small>密码、私钥和聊天记录通过 Android 密钥库加密</small></div>${icon('shield')}</div><div class="settings-item"><div><strong>断开全部连接</strong><small>运行中的任务可能中断，服务器文件改动会保留</small></div><button class="btn" data-action="disconnectAll">断开</button></div><p class="about-note">Codex Pocket 0.1.1 · 独立客户端，非 OpenAI 官方应用。<br>聊天任务使用服务器上 Codex 的账号和配置。Android 系统可能回收后台连接，首版不保证断网后任务继续运行。重新连接后可恢复会话上下文。</p></div>`);
 }
 function hostInfo(id=hostId){
   const h=state.hosts.find(h=>h.id===id);if(!h){editor();return;}const con=connection(id);
-  openDialog('hostInfo',`${head(h.name)}<div class="dialog-body"><div class="host-details">状态：<b>${statusText(con.status)}</b><br>地址：<b>${esc(h.user+'@'+h.host+':'+h.port)}</b><br>目录：<b>${esc(h.cwd)}</b><br>Codex：<b>${esc(h.codex||'codex')}</b></div><div class="settings-title">已固定的 SSH 主机指纹</div><div class="fingerprint">${esc(h.fingerprint||'首次连接时核对并保存')}</div><p class="about-note">如果服务器重新安装导致密钥变化，连接将被阻止。请在云控制台核对；确认后删除本地连接并重新添加。</p><div class="settings-item"><div><strong>导入服务器聊天记录</strong><small>读取这台服务器上已有的 Codex 会话</small></div><button class="btn" data-action="syncHistory" data-id="${esc(id)}">导入</button></div></div><div class="dialog-actions"><button class="btn danger" data-action="confirmDeleteHost" data-id="${esc(id)}">删除</button><button class="btn" data-action="editHost" data-id="${esc(id)}">编辑</button><button class="btn primary" data-action="${con.status==='online'?'disconnect':'connect'}" data-id="${esc(id)}">${con.status==='online'?'断开连接':'连接'}</button></div>`);
+  openDialog('hostInfo',`${head(h.name)}<div class="dialog-body"><div class="host-details">状态：<b>${statusText(con.status)}</b><br>地址：<b>${esc(h.user+'@'+h.host+':'+h.port)}</b><br>目录：<b>${esc(h.cwd||con.cwd||'自动（服务器主目录）')}</b><br>Codex：<b>${esc(h.codex||connection(id).codex||'自动查找')}</b></div><div class="settings-title">已固定的 SSH 主机指纹</div><div class="fingerprint">${esc(h.fingerprint||'首次连接时核对并保存')}</div><p class="about-note">如果服务器重新安装导致密钥变化，连接将被阻止。请在云控制台核对；确认后删除本地连接并重新添加。</p><div class="settings-item"><div><strong>导入服务器聊天记录</strong><small>读取这台服务器上已有的 Codex 会话</small></div><button class="btn" data-action="syncHistory" data-id="${esc(id)}">导入</button></div></div><div class="dialog-actions"><button class="btn danger" data-action="confirmDeleteHost" data-id="${esc(id)}">删除</button><button class="btn" data-action="editHost" data-id="${esc(id)}">编辑</button><button class="btn primary" data-action="${con.status==='online'?'disconnect':'connect'}" data-id="${esc(id)}">${con.status==='online'?'断开连接':'连接'}</button></div>`);
+  const details=$('#dialog .host-details');
+  if(details&&con.error)details.insertAdjacentHTML('afterend',`<div class="connection-problem"><strong>连接错误</strong><div>${esc(con.error)}</div></div>`);
+  if(con.status==='connecting'){const b=$('#dialog .dialog-actions .primary');if(b){b.dataset.action='disconnect';b.textContent='取消连接';}}
 }
 function chatMenu(id){
   const c=state.chats.find(c=>c.id===id);if(!c)return;
@@ -180,11 +194,11 @@ document.addEventListener('click',e=>{
 document.addEventListener('submit',e=>{
   e.preventDefault();const f=e.target,v=Object.fromEntries(new FormData(f));
   if(f.id==='host-form'){
-    if(!v.cwd.startsWith('/')){$('#form-error').textContent='工作目录须为 Linux 绝对路径';return;}
+    if(v.cwd&&!v.cwd.startsWith('/')){$('#form-error').textContent='工作目录须为 Linux 绝对路径';return;}
     const old=state.hosts.find(h=>h.id===f.dataset.id);
     if((!old?.hasSecret||old.auth!==v.auth)&&!(v.auth==='key'?v.privateKey.trim():v.password)){$('#form-error').textContent='请填写所选认证方式的凭据';return;}
     if(f.dataset.id)v.id=f.dataset.id;v.port=Number(v.port);$('#save-host').disabled=true;native({type:'saveHost',host:v});
-  }else if(f.id==='chat-form'){if(!v.cwd.startsWith('/')){$('#form-error').textContent='工作目录须为 Linux 绝对路径';return;}native({type:'newChat',...v});}
+  }else if(f.id==='chat-form'){if(v.cwd&&!v.cwd.startsWith('/')){$('#form-error').textContent='工作目录须为 Linux 绝对路径';return;}native({type:'newChat',...v});}
   else if(f.id==='rename-form'){native({type:'renameChat',chatId:f.dataset.id,title:v.title});closeDialog();}
 });
 document.addEventListener('change',e=>{

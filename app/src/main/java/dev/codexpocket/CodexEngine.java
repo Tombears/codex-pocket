@@ -14,6 +14,7 @@ final class CodexEngine {
     final String hostId;
     private final CodexService owner;
     private final Store store;
+    private final JSONObject overrideHost;
     private Session ssh;
     private ChannelExec channel;
     private volatile Rpc rpc;
@@ -29,14 +30,16 @@ final class CodexEngine {
     volatile String busyChat="";
     private volatile String turnId="";
     private volatile boolean closing;
+    private volatile boolean disposed;
     private final StderrTail stderr=new StderrTail(4000);
     volatile String runtimeCwd="",runtimeCodex="";
     record Pending(Object id,String method,JSONObject params,String chatId){}
-    CodexEngine(CodexService owner,String hostId){this.owner=owner;this.hostId=hostId;this.store=owner.store;}
+    CodexEngine(CodexService owner,String hostId){this(owner,hostId,null);}
+    CodexEngine(CodexService owner,String hostId,JSONObject overrideHost){this.owner=owner;this.hostId=hostId;this.store=owner.store;this.overrideHost=overrideHost;}
     private void phase(long attempt,String label)throws IOException{
-        if(!connection.stage(attempt,label))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,label);owner.update();
+        if(disposed||!connection.stage(attempt,label))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,label);owner.update();
     }
-    private void requireActive(long attempt)throws IOException{if(!connection.active(attempt))throw new IOException("连接已取消或超时");}
+    private void requireActive(long attempt)throws IOException{if(disposed||!connection.active(attempt))throw new IOException("连接已取消或超时");}
     void connect()throws Exception{
         if(!connectLock.tryLock())throw new IOException("该虚拟机正在连接，可先取消连接再重试");
         long attempt=0;
@@ -47,7 +50,7 @@ final class CodexEngine {
             watchdog=DEADLINES.scheduleAtFixedRate(()->{
                 if(connection.expire(token)){closing=true;owner.log("ERROR","connection/"+hostId,connection.snapshot().error());owner.trustPrompts.remove(hostId);owner.update();cleanupTransport();}
             },1,1,TimeUnit.SECONDS);
-            JSONObject h=store.host(hostId);if(h==null)throw new IOException("虚拟机不存在");
+            JSONObject h=overrideHost==null?store.host(hostId):overrideHost;if(h==null)throw new IOException("虚拟机不存在");
             String address=SshAddress.normalize(h.optString("host"));
             owner.log("INFO","connection/"+hostId,"Start "+address+":"+h.optInt("port",22)+" auth="+h.optString("auth"));
             phase(attempt,"加载 SSH 密钥");
@@ -74,7 +77,7 @@ final class CodexEngine {
                         trust=new CompletableFuture<>();candidateFingerprint=fp;
                         owner.event(Json.obj("type","trust","hostId",hostId,"name",h.optString("name"),"address",name,"fingerprint",fp));
                         boolean yes=trust.get(30,TimeUnit.SECONDS);trust=null;owner.trustPrompts.remove(hostId);
-                        if(yes){phase(token,"验证 SSH 身份");store.put(h,"fingerprint",fp);store.flush();return OK;}
+                        if(yes){phase(token,"验证 SSH 身份");if(overrideHost==null){store.put(h,"fingerprint",fp);store.flush();}else h.put("fingerprint",fp);return OK;}
                     }catch(Exception ignored){}return NOT_INCLUDED;
                 }
                 public void add(HostKey key,UserInfo ui){}
@@ -124,14 +127,14 @@ final class CodexEngine {
             channel.setErrStream(stderr);
             channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
             rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.1.2")),30);
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.2.0")),30);
             requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
             for(String line:stderr.text().split("\n")){
                 if(line.startsWith("__CP_CWD__="))runtimeCwd=line.substring(11);
                 if(line.startsWith("__CP_BIN__="))runtimeCodex=line.substring(11);
             }
-            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,"Codex handshake complete");owner.update();
+            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,"Codex handshake complete");if(overrideHost==null)owner.connected(hostId);owner.update();
         }catch(Exception|LinkageError e){
             String label=connection.snapshot().phase();
             String message=(label.isEmpty()?"":label+"失败：")+errorMessage(e);
@@ -286,12 +289,15 @@ final class CodexEngine {
         }
         store.put(c,"messages",new JSONArray());for(int i=0;i<items.length();i++)recordItem(c,items.getJSONObject(i),true);store.put(c,"needsHistory",false);
     }
-    private void fail(Exception e){String id=busyChat;if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){store.put(c,"status","interrupted");store.message(c,"lost-"+UUID.randomUUID(),"system","error",errorMessage(e)+"\n重新连接后可继续此会话；请先核对服务器上的执行结果。");}}else owner.event(Json.obj("type","toast","message",errorMessage(e)));connection.failCurrent(errorMessage(e));owner.update();}
+    private void fail(Exception e){owner.log("WARN","transport/"+hostId,errorMessage(e));String id=busyChat;if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){store.put(c,"status","interrupted");store.message(c,"lost-"+UUID.randomUUID(),"system","error",errorMessage(e)+"\n重新连接后可继续此会话；请先核对服务器上的执行结果。");}}else owner.event(Json.obj("type","toast","message",errorMessage(e)));connection.failCurrent(errorMessage(e));owner.update();}
+    boolean transportAlive(){return ssh!=null&&ssh.isConnected()&&channel!=null&&channel.isConnected()&&rpc!=null;}
+    void networkLost(){if(connection.snapshot().status().equals("online")){fail(new IOException("网络已切换或断开，正在等待自动重连"));cleanupTransport();}}
     void close(){
         connection.cancel();
         ScheduledFuture<?> timer=watchdog;if(timer!=null)timer.cancel(false);
         cleanupTransport();owner.update();
     }
+    void dispose(){disposed=true;close();}
     private void cleanupTransport(){
         owner.trustPrompts.remove(hostId);
         closing=true;CompletableFuture<Boolean> f=trust;if(f!=null)f.complete(false);trust=null;

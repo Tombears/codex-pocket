@@ -31,7 +31,23 @@ public class UpgradeAndSshTest {
             assertTrue(context.bindService(new Intent(context,CodexService.class),binding,Context.BIND_AUTO_CREATE));
             assertTrue("Service did not bind",ready.await(15,TimeUnit.SECONDS));
             CodexEngine engine=new CodexEngine(owner[0],"ssh-fixture");
-            try{engine.connect();assertEquals("online",engine.connection.snapshot().status());assertEquals("/home/fixture",engine.runtimeCwd);}finally{engine.close();context.unbindService(binding);instrumentation.runOnMainSync(activity::finish);}
+            try{
+                engine.connect();assertEquals("online",engine.connection.snapshot().status());assertEquals("/home/fixture",engine.runtimeCwd);engine.close();
+                JSONObject draft=Json.obj("id","ssh-fixture","name","unsaved-test-name","host","10.0.2.2","port",2222,"user","fixture","auth","key","privateKey","","cwd","","codex","");
+                assertFalse(owner[0].store.prepareHost(draft).getString("privateKey").isEmpty());
+                CountDownLatch tested=new CountDownLatch(1);java.util.concurrent.atomic.AtomicReference<JSONObject> result=new java.util.concurrent.atomic.AtomicReference<>();
+                CodexService.Listener testListener=e->{if(e.optString("type").equals("connectionTestResult")){result.set(e);tested.countDown();}};owner[0].listen(testListener);
+                owner[0].action(Json.obj("type","testConnection","testId","fixture-check","host",draft));assertTrue("Connection test timed out",tested.await(35,TimeUnit.SECONDS));assertTrue(result.get().toString(),result.get().optBoolean("ok"));
+                assertEquals("localhost fixture",owner[0].store.host("ssh-fixture").getString("name"));owner[0].unlisten(testListener);
+                owner[0].action(Json.obj("type","testConnection","testId","cancel-check","host",draft));owner[0].action(Json.obj("type","cancelConnectionTest","testId","cancel-check"));assertTrue(owner[0].tests.isEmpty());
+                owner[0].action(Json.obj("type","connect","hostId","ssh-fixture"));
+                await(()->owner[0].engines.containsKey("ssh-fixture")&&owner[0].engines.get("ssh-fixture").connection.snapshot().status().equals("online"),35000);
+                CodexEngine kept=owner[0].engines.get("ssh-fixture");assertTrue(owner[0].store.wantedConnections().contains("ssh-fixture"));
+                instrumentation.runOnMainSync(()->activity.moveTaskToBack(true));Thread.sleep(12000);assertTrue("Background transport should remain alive",kept.transportAlive());
+                JSONObject interrupted=owner[0].store.newChat("ssh-fixture","");owner[0].store.put(interrupted,"status","working");kept.busyChat=interrupted.getString("id");kept.networkLost();
+                await(()->kept.connection.snapshot().status().equals("online"),35000);assertEquals("interrupted",interrupted.getString("status"));assertEquals("",kept.busyChat);
+                owner[0].action(Json.obj("type","disconnect","hostId","ssh-fixture"));await(()->!owner[0].store.wantedConnections().contains("ssh-fixture"),5000);Thread.sleep(6000);assertEquals("offline",kept.connection.snapshot().status());
+            }finally{engine.close();owner[0].action(Json.obj("type","disconnect","hostId","ssh-fixture"));context.unbindService(binding);instrumentation.runOnMainSync(activity::finish);}
         }else{
             assertEquals("fixture-preserved",store.host("upgrade-host").getString("password"));
             assertTrue(store.snapshot().toString().contains("upgrade history preserved"));assertEquals("light",store.snapshot().getString("theme"));
@@ -44,4 +60,5 @@ public class UpgradeAndSshTest {
             log.record("INFO","test","current-log-entry password=must-not-leak");String exported=log.exportText();assertFalse(exported.contains("expired-log-entry"));assertFalse(exported.contains("must-not-leak"));assertTrue(exported.contains("current-log-entry"));
         }finally{log.close();}
     }
+    private static void await(java.util.function.BooleanSupplier condition,long timeout)throws Exception{long deadline=SystemClock.elapsedRealtime()+timeout;while(!condition.getAsBoolean()&&SystemClock.elapsedRealtime()<deadline)Thread.sleep(100);assertTrue("Condition timed out",condition.getAsBoolean());}
 }

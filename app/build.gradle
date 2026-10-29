@@ -1,6 +1,6 @@
 plugins { id 'com.android.application' }
-def appVersionCode = providers.gradleProperty('versionCode').getOrElse('3').toInteger()
-def appVersionName = providers.gradleProperty('versionName').getOrElse('0.1.2')
+def appVersionCode = providers.gradleProperty('versionCode').getOrElse('4').toInteger()
+def appVersionName = providers.gradleProperty('versionName').getOrElse('0.2.0')
 android {
     namespace 'dev.codexpocket'
     compileSdk 35

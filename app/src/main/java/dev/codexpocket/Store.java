@@ -65,7 +65,7 @@ final class Store {
     synchronized JSONObject host(String id){return find(data.optJSONArray("hosts"),id);}
     synchronized JSONObject chat(String id){return find(data.optJSONArray("chats"),id);}
     static JSONObject find(JSONArray arr,String id){for(int i=0;i<arr.length();i++){JSONObject o=arr.optJSONObject(i);if(o.optString("id").equals(id))return o;}return null;}
-    synchronized JSONObject saveHost(JSONObject input)throws Exception{
+    synchronized JSONObject prepareHost(JSONObject input)throws Exception{
         String id=input.optString("id",UUID.randomUUID().toString());JSONObject old=host(id);
         JSONObject h=old==null?new JSONObject():Json.copy(old);
         for(String k:new String[]{"name","host","user","cwd","codex","auth","model","password","privateKey","passphrase"}){
@@ -82,7 +82,15 @@ final class Store {
         if(!Set.of("password","key").contains(h.optString("auth")))throw new Exception("请选择认证方式");
         Json.command(h.optString("cwd"),h.optString("codex","codex"));
         if(old!=null&&(!old.optString("host").equals(h.optString("host"))||old.optInt("port")!=h.optInt("port")))h.remove("fingerprint");
-        JSONArray hs=data.getJSONArray("hosts");if(old!=null)remove(hs,id);hs.put(h);flush();changed.run();return h;
+        if(h.optString(h.optString("auth").equals("key")?"privateKey":"password").isBlank())throw new Exception("请填写认证凭据");
+        return h;
+    }
+    synchronized JSONObject saveHost(JSONObject input)throws Exception{
+        JSONObject h=prepareHost(input);String id=h.getString("id");h.put("keepConnected",false);
+        JSONArray hs=data.getJSONArray("hosts");remove(hs,id);hs.put(h);flush();changed.run();return h;
+    }
+    synchronized void keepConnected(String id,boolean value){JSONObject h=host(id);if(h!=null&&h.optBoolean("keepConnected")!=value){put(h,"keepConnected",value);flush();}}
+    synchronized Set<String> wantedConnections(){Set<String> ids=new HashSet<>();JSONArray hs=data.optJSONArray("hosts");for(int i=0;i<hs.length();i++){JSONObject h=hs.optJSONObject(i);if(h.optBoolean("keepConnected"))ids.add(h.optString("id"));}return ids;
     }
     synchronized JSONObject newChat(String hostId,String cwd)throws Exception{
         JSONObject host=host(hostId);if(host==null)throw new Exception("请先添加虚拟机");

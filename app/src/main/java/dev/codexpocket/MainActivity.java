@@ -50,6 +50,8 @@ public final class MainActivity extends Activity {
         @JavascriptInterface public void action(String json){
             try{JSONObject a=new JSONObject(json);if(a.optString("type").equals("copy")){android.content.ClipboardManager c=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);c.setPrimaryClip(ClipData.newPlainText("Codex",a.optString("text")));return;}
                 if(a.optString("type").equals("exportLogs")){runOnUiThread(()->{Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("text/plain");intent.putExtra(Intent.EXTRA_TITLE,"CodexPocket-log-"+new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",java.util.Locale.ROOT).format(new java.util.Date())+".txt");startActivityForResult(intent,20);});return;}
+                if(a.optString("type").equals("backgroundSettings")){runOnUiThread(()->{try{Intent i=new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,android.net.Uri.parse("package:"+getPackageName()));startActivity(i);}catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.parse("package:"+getPackageName())));}});return;}
+                if(a.optString("type").equals("openLink")){android.net.Uri uri=android.net.Uri.parse(a.optString("url"));if(("https".equals(uri.getScheme())||"http".equals(uri.getScheme()))&&uri.getHost()!=null)runOnUiThread(()->{try{startActivity(new Intent(Intent.ACTION_VIEW,uri).addCategory(Intent.CATEGORY_BROWSABLE));}catch(Exception e){deliver(Json.obj("type","toast","message","没有可打开链接的浏览器"));}});return;}
                 if(a.optString("type").equals("theme")){runOnUiThread(()->{boolean light=a.optString("value").equals("light");getWindow().setStatusBarColor(light?0xfff7f7f8:0xff17181b);getWindow().setNavigationBarColor(light?0xfff7f7f8:0xff17181b);getWindow().getDecorView().setSystemUiVisibility(light?View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR:0);});}
                 if(service!=null)service.action(a);
             }catch(Exception e){deliver(Json.obj("type","toast","message","请求无法解析"));}
@@ -57,5 +59,6 @@ public final class MainActivity extends Activity {
     }
     @Override public void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(requestCode==20&&resultCode==RESULT_OK&&data!=null&&data.getData()!=null&&service!=null)service.exportLogs(data.getData());}
     @Override public void onBackPressed(){web.evaluateJavascript("window.back()",null);}
+    @Override public void onResume(){super.onResume();if(service!=null)service.update();}
     @Override public void onDestroy(){pageReady=false;if(service!=null)service.unlisten(listener);if(bound)unbindService(connection);if(web!=null){web.removeJavascriptInterface("Android");web.destroy();web=null;}super.onDestroy();}
 }

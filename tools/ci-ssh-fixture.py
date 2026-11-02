@@ -51,6 +51,9 @@ def serve(path):
                 if method in ('thread/start','thread/resume'):
                     assert event['params']['approvalPolicy'] in ('on-request','untrusted','never')
                     result={'thread':{'id':'fixture-thread','cwd':'/home/fixture'}}
+                if method=='thread/items/list':
+                    assert event['params']['threadId']=='fixture-thread'
+                    result={'data':[{'item':{'id':'fixture-latest-answer','type':'agentMessage','text':'Latest history after reconnect'}},{'item':{'id':'remote-image-fixture','type':'imageView','path':'/home/fixture/output/cat.png'}}],'nextCursor':None}
                 if method in ('turn/start','turn/steer'):
                     params=event['params'];assert params['threadId']=='fixture-thread'
                     if method=='turn/start':assert params['approvalPolicy'] in ('on-request','untrusted','never')

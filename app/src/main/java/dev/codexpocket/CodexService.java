@@ -102,7 +102,7 @@ public final class CodexService extends Service {
     void log(String level,String tag,String message){if(diagnostics!=null)try{diagnostics.record(level,tag,message);}catch(Exception ignored){}}
     void exportLogs(Uri uri){workers.submit(()->{try{if(diagnostics==null)throw new java.io.IOException("日志暂不可用");try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选文件");out.write(diagnostics.exportText().getBytes(StandardCharsets.UTF_8));}event(Json.obj("type","toast","message","已导出最近 24 小时日志"));}catch(Exception e){event(Json.obj("type","toast","message","日志导出失败："+e.getMessage()));}});}
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_STICKY;}
-    void connected(String id){synchronized(connectionControl){CodexEngine e=engines.get(id);if(!destroyed&&e!=null&&e.connection.snapshot().status().equals("online")){store.keepConnected(id,true);reconnect.succeeded(id);}}}
+    void connected(String id){synchronized(connectionControl){CodexEngine e=engines.get(id);if(!destroyed&&e!=null&&e.connection.snapshot().status().equals("online")){store.keepConnected(id,true);store.historyStale(id);reconnect.succeeded(id);}}}
     private void disconnect(String id){synchronized(connectionControl){store.keepConnected(id,false);reconnect.forget(id);CodexEngine e=engines.remove(id);if(e!=null)e.dispose();trustPrompts.remove(id);}}
     private void maintainConnections(){
         if(destroyed||store==null)return;Set<String> wanted=store.wantedConnections();
@@ -144,6 +144,31 @@ public final class CodexService extends Service {
         try{JSONObject progress=new JSONObject();for(var entry:tests.entrySet()){var s=entry.getValue().connection.snapshot();progress.put(entry.getKey(),Json.obj("phase",s.phase(),"status",s.status()));}out.put("connectionTests",progress);out.put("batteryUnrestricted",getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName()));out.put("connections",connections);out.put("trustPrompts",new JSONArray(trustPrompts.values()));}catch(Exception ignored){}return out;
     }
     private CodexEngine engine(String id){if(store.host(id)==null)throw new IllegalArgumentException("虚拟机不存在");return engines.computeIfAbsent(id,h->new CodexEngine(this,h));}
+    void transferFile(Uri uri,JSONObject action,boolean upload){
+        workers.submit(()->{
+            try{
+                JSONObject c=store.chat(action.optString("chatId"));if(c==null)throw new java.io.IOException("聊天不存在");
+                CodexEngine e=engine(c.optString("hostId"));e.connect();
+                event(Json.obj("type","toast","message",upload?"正在上传文件…":"正在下载文件…"));
+                if(upload){
+                    String name="file";
+                    try(android.database.Cursor cursor=getContentResolver().query(uri,new String[]{android.provider.OpenableColumns.DISPLAY_NAME},null,null,null)){if(cursor!=null&&cursor.moveToFirst())name=cursor.getString(0);}
+                    try(java.io.InputStream input=getContentResolver().openInputStream(uri)){
+                        if(input==null)throw new java.io.IOException("无法读取所选文件");
+                        String path=e.uploadFile(c.optString("cwd"),name==null?"file":name,input);
+                        String label=RemoteFiles.name(name==null?"file":name).replace("[","\\[").replace("]","\\]");
+                        store.message(c,"upload-"+java.util.UUID.randomUUID(),"system","file","已上传文件：["+label+"]("+new java.net.URI(null,null,path,null).toASCIIString()+")");
+                        event(Json.obj("type","fileUploaded","chatId",c.optString("id"),"path",path));
+                    }
+                }else{
+                    String path=RemoteFiles.path(action.optString("path"),c.optString("cwd").isBlank()?e.runtimeCwd:c.optString("cwd"));
+                    try(java.io.OutputStream output=getContentResolver().openOutputStream(uri,"wt")){if(output==null)throw new java.io.IOException("无法写入保存位置");e.downloadFile(path,output);}
+                    event(Json.obj("type","toast","message","文件已保存"));
+                }
+            }catch(Exception ex){event(Json.obj("type","toast","message",(upload?"上传失败：":"下载失败：")+ex.getMessage()));}
+            finally{try{getContentResolver().releasePersistableUriPermission(uri,upload?Intent.FLAG_GRANT_READ_URI_PERMISSION:Intent.FLAG_GRANT_WRITE_URI_PERMISSION);}catch(SecurityException ignored){}update();}
+        });
+    }
     void action(JSONObject a){
         String type=a.optString("type");
         if(type.equals("removeImage")){try{attachments().remove(a.optString("id"));}catch(Exception ignored){}return;}
@@ -175,7 +200,7 @@ public final class CodexService extends Service {
                         JSONObject c=store.chat(chatId);if(c==null)break;CodexEngine e=engines.get(c.optString("hostId"));if(e!=null&&e.busyChat.equals(chatId))throw new Exception("任务运行中，请先停止再删除");store.deleteChat(chatId);break;
                     }
                     case "renameChat":{JSONObject c=store.chat(chatId);if(c!=null&&!a.optString("title").isBlank())store.put(c,"title",a.optString("title"));break;}
-                    case "connect":engine(hostId).connect();event(Json.obj("type","toast","message","SSH 与 Codex 已连接"));break;
+                    case "connect":{CodexEngine e=engine(hostId);if(!e.connection.snapshot().status().equals("connecting")){e.connect();event(Json.obj("type","toast","message","SSH 与 Codex 已连接"));}break;}
                     case "disconnect":disconnect(hostId);break;
                     case "send":case "steer":{
                         JSONObject c=store.chat(chatId);if(c==null)throw new Exception("请先新建聊天");String text=a.optString("text").strip();Attachments.Batch images=attachments().prepare(a.optJSONArray("images"));if(text.isEmpty()&&images.input().length()==0||text.length()>100000)throw new Exception("请填写消息或选择图片，文字不能超过 100000 字符");CodexEngine e=engine(c.optString("hostId"));if(type.equals("steer"))e.steer(chatId,text,images);else e.send(chatId,text,images);for(int i=0;i<images.previews().length();i++)attachments().remove(images.previews().getJSONObject(i).getString("id"));break;
@@ -195,8 +220,8 @@ public final class CodexService extends Service {
                     case "disconnectAll":for(String id:store.wantedConnections())disconnect(id);for(CodexEngine e:engines.values())disconnect(e.hostId);cancelTests();trustPrompts.clear();break;
                     default:throw new IllegalArgumentException("未知操作");
                 }
-                event(Json.obj("type","actionComplete","action",type,"chatId",chatId));update();
-            }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
+                event(Json.obj("type","actionComplete","action",type,"chatId",chatId,"hostId",hostId,"requestId",a.optString("requestId")));update();
+            }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"hostId",a.optString("hostId"),"requestId",a.optString("requestId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
         });
     }
     @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();imageWorkers.shutdownNow();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}

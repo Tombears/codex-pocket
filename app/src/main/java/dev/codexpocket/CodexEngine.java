@@ -127,7 +127,7 @@ final class CodexEngine {
             channel.setErrStream(stderr);
             channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
             rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.3.0")),30);
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.4.2")),30);
             requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
             for(String line:stderr.text().split("\n")){
@@ -235,6 +235,9 @@ final class CodexEngine {
         }catch(Exception e){owner.event(Json.obj("type","toast","message","协议事件处理失败："+e.getMessage()));}
     }
     private void recordItem(JSONObject c,JSONObject item,boolean completed)throws Exception{
+        recordItem(c,item,completed,true);
+    }
+    private void recordItem(JSONObject c,JSONObject item,boolean completed,boolean receiveImages)throws Exception{
         String type=item.optString("type"),id=item.optString("id");
         List<String> inlineImages=completed?RemoteImages.inline(item):List.of();
         if(type.equals("agentMessage")){
@@ -266,9 +269,24 @@ final class CodexEngine {
                     JSONObject ref=refs.getJSONObject(i),prior=old.getJSONObject(j);
                     if(!ref.optString("path").isEmpty()&&ref.optString("path").equals(prior.optString("path"))||ref.optBoolean("inline")&&prior.optBoolean("inline")&&i==j)refs.put(i,prior);
                 }
-                store.put(message,"remoteImages",refs);owner.receiveRemoteImages(this,c.optString("id"),id,inlineImages);
+                store.put(message,"remoteImages",refs);if(receiveImages)owner.receiveRemoteImages(this,c.optString("id"),id,inlineImages);
             }
         }
+    }
+    String uploadFile(String cwd,String name,InputStream input)throws Exception{
+        connect();Session session=ssh;ChannelSftp sftp=(ChannelSftp)session.openChannel("sftp");String target=null;
+        try{
+            sftp.connect(10000);sftp.cd(RemoteFiles.literal(cwd.isBlank()?runtimeCwd:cwd));
+            String directory=".codex-pocket-upload-"+UUID.randomUUID();sftp.mkdir(directory);sftp.cd(directory);
+            target=sftp.pwd()+"/"+RemoteFiles.name(name);
+            try(OutputStream output=sftp.put(RemoteFiles.literal(target),ChannelSftp.OVERWRITE)){RemoteFiles.copy(input,output);}return target;
+        }catch(Exception e){if(target!=null)try{sftp.rm(RemoteFiles.literal(target));sftp.rmdir(RemoteFiles.literal(target.substring(0,target.lastIndexOf('/'))));}catch(Exception ignored){}throw e;}
+        finally{sftp.disconnect();}
+    }
+    void downloadFile(String path,OutputStream output)throws Exception{
+        connect();Session session=ssh;ChannelSftp sftp=(ChannelSftp)session.openChannel("sftp");
+        try{sftp.connect(10000);String literal=RemoteFiles.literal(path);SftpATTRS attrs=sftp.stat(literal);if(attrs.isDir())throw new IOException("请选择文件，不能下载目录");if(attrs.getSize()>RemoteFiles.MAX_BYTES)throw new IOException("文件超过 256 MB");try(InputStream input=sftp.get(literal)){RemoteFiles.copy(input,output);}}
+        finally{sftp.disconnect();}
     }
     byte[] readImage(String path)throws Exception{
         Session session=ssh;if(session==null||!session.isConnected())throw new IOException("服务器未连接，请连接后重试");
@@ -307,20 +325,35 @@ final class CodexEngine {
     synchronized void loadHistory(String chatId)throws Exception{
         connect();JSONObject c=store.chat(chatId);if(c==null||c.optString("remoteId").isEmpty())return;
         if(!busyChat.isEmpty())throw new IOException("请等待当前任务结束后刷新远程记录");
+        Rpc historyRpc=rpc;long epoch=c.optLong("historyEpoch");
         JSONArray items=new JSONArray();String cursor=null;
         try{
             do{
                 JSONObject p=Json.obj("threadId",c.optString("remoteId"),"limit",100,"sortDirection","asc");if(cursor!=null)p.put("cursor",cursor);
-                JSONObject r=rpc.request("thread/items/list",p);JSONArray rows=r.optJSONArray("data");
+                JSONObject r=historyRpc.request("thread/items/list",p);JSONArray rows=r.optJSONArray("data");
                 if(rows!=null)for(int i=0;i<rows.length();i++)items.put(rows.getJSONObject(i).getJSONObject("item"));
                 cursor=r.isNull("nextCursor")?null:r.optString("nextCursor",null);
             }while(cursor!=null&&!cursor.isEmpty());
         }catch(Exception e){
-            if(!e.getMessage().contains("method")&&!e.getMessage().contains("supported"))throw e;
-            JSONObject r=rpc.request("thread/read",Json.obj("threadId",c.optString("remoteId"),"includeTurns",true));
+            String error=e.getMessage()==null?"":e.getMessage();if(!error.contains("method")&&!error.contains("supported"))throw e;
+            JSONObject r=historyRpc.request("thread/read",Json.obj("threadId",c.optString("remoteId"),"includeTurns",true));
             JSONArray turns=r.getJSONObject("thread").optJSONArray("turns");if(turns!=null)for(int i=0;i<turns.length();i++){JSONArray a=turns.getJSONObject(i).optJSONArray("items");if(a!=null)for(int j=0;j<a.length();j++)items.put(a.getJSONObject(j));}
         }
-        store.put(c,"messages",new JSONArray());for(int i=0;i<items.length();i++)recordItem(c,items.getJSONObject(i),true);store.put(c,"needsHistory",false);
+        synchronized(store){
+            if(historyRpc!=rpc||!connection.snapshot().status().equals("online")||epoch!=c.optLong("historyEpoch")||store.chat(chatId)!=c)throw new IOException("连接或聊天已变化，请重试同步记录");
+            JSONArray previous=c.getJSONArray("messages"),latest=new JSONArray();
+            try{
+                store.put(c,"messages",latest);
+                for(int i=0;i<items.length();i++){
+                    JSONObject item=items.getJSONObject(i),cached=Store.find(previous,item.optString("id"));
+                    if(cached!=null&&Store.find(latest,item.optString("id"))==null)latest.put(Json.copy(cached));
+                    recordItem(c,item,true,false);
+                }
+                HistoryRefresh.keepUploads(previous,latest);store.put(c,"needsHistory",false);
+                if(c.optString("status").equals("interrupted"))store.put(c,"status","idle");
+            }catch(Exception ex){store.put(c,"messages",previous);throw ex;}
+        }
+        for(int i=0;i<items.length();i++){JSONObject item=items.getJSONObject(i);owner.receiveRemoteImages(this,chatId,item.optString("id"),RemoteImages.inline(item));}
     }
     private void fail(Exception e){owner.log("WARN","transport/"+hostId,errorMessage(e));String id=busyChat;if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){store.put(c,"status","interrupted");store.message(c,"lost-"+UUID.randomUUID(),"system","error",errorMessage(e)+"\n重新连接后可继续此会话；请先核对服务器上的执行结果。");}}else owner.event(Json.obj("type","toast","message",errorMessage(e)));connection.failCurrent(errorMessage(e));owner.update();}
     boolean transportAlive(){return ssh!=null&&ssh.isConnected()&&channel!=null&&channel.isConnected()&&rpc!=null;}

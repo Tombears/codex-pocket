@@ -116,6 +116,7 @@ final class Store {
         for(int i=cs.length()-1;i>=0;i--)if(cs.optJSONObject(i).optString("hostId").equals(id))cs.remove(i);
         flush();changed.run();
     }
+    synchronized void historyStale(String hostId){try{if(HistoryRefresh.invalidate(data.getJSONArray("chats"),hostId))touch();}catch(JSONException e){throw new IllegalStateException(e);}}
     synchronized void theme(String v){if(!v.equals("dark")&&!v.equals("light"))return;put(data,"theme",v);}
     synchronized String approvalMode(JSONObject chat){return ApprovalMode.require(chat.optString("approvalMode",data.optString("approvalMode","on-request")));}
     synchronized void approvalMode(String chatId,String mode){

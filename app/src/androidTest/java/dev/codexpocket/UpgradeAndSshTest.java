@@ -63,6 +63,10 @@ public class UpgradeAndSshTest {
                 owner[0].action(Json.obj("type","viewRemoteImage","chatId",interrupted.getString("id"),"messageId","remote-image-fixture","index",0));assertTrue("Received image did not open",imageOpened.await(15,TimeUnit.SECONDS));owner[0].unlisten(imageListener);
                 assertThrows(java.io.IOException.class,()->kept.steer("wrong-chat","no",batch));media.remove(image.getString("id"));assertThrows(Exception.class,()->media.prepare(new JSONArray().put(Json.obj("id",image.getString("id")))));picture.delete();kept.networkLost();
                 await(()->kept.connection.snapshot().status().equals("online"),35000);assertEquals("interrupted",interrupted.getString("status"));assertEquals("",kept.busyChat);
+                assertTrue("Reconnect must invalidate remote history",interrupted.getBoolean("needsHistory"));
+                kept.loadHistory(interrupted.getString("id"));assertFalse(interrupted.getBoolean("needsHistory"));
+                assertEquals("Latest history after reconnect",Store.find(interrupted.getJSONArray("messages"),"fixture-latest-answer").getString("text"));
+                assertEquals(receivedImage.getString("id"),Store.find(interrupted.getJSONArray("messages"),"remote-image-fixture").getJSONArray("remoteImages").getJSONObject(0).getString("id"));
                 owner[0].action(Json.obj("type","disconnect","hostId","ssh-fixture"));await(()->!owner[0].store.wantedConnections().contains("ssh-fixture"),5000);Thread.sleep(6000);assertEquals("offline",kept.connection.snapshot().status());
             }finally{engine.close();owner[0].action(Json.obj("type","disconnect","hostId","ssh-fixture"));context.unbindService(binding);instrumentation.runOnMainSync(activity::finish);}
         }else{

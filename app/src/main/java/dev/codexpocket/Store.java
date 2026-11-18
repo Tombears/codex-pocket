@@ -1,7 +1,6 @@
 package dev.codexpocket;
 
 import android.content.*;
-import android.os.*;
 import android.security.keystore.*;
 import android.util.Base64;
 import org.json.*;
@@ -9,15 +8,21 @@ import java.security.*;
 import javax.crypto.*;
 import javax.crypto.spec.GCMParameterSpec;
 import java.util.*;
+import java.util.concurrent.*;
 
 final class Store {
     private final SharedPreferences prefs;
     private final SecretKey key;
     private JSONObject data;
-    private final Handler handler=new Handler(Looper.getMainLooper());
-    private final Runnable saver=()->flush();
+    private final ScheduledThreadPoolExecutor disk=new ScheduledThreadPoolExecutor(1,r->{Thread t=new Thread(r,"codex-store");t.setDaemon(true);return t;});
+    private ScheduledFuture<?> pendingSave;
+    private String visibleChatId="";
+    private boolean uiDirty=true;
+    private final Map<String,StringBuilder> visibleDeltas=new LinkedHashMap<>();
     Runnable changed=()->{};
+    java.util.function.Consumer<Exception> saveFailed=e->{};
     Store(Context c) throws Exception {
+        disk.setRemoveOnCancelPolicy(true);
         prefs=c.getSharedPreferences("encrypted_store",Context.MODE_PRIVATE);
         KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);
         if(!ks.containsAlias("codexpocket-v1")){
@@ -55,7 +60,14 @@ final class Store {
             if(!prefs.edit().putString("data",Base64.encodeToString(raw,Base64.NO_WRAP)).commit())throw new IllegalStateException("无法保存本地数据");
         }catch(Exception e){throw new IllegalStateException("加密保存失败",e);}
     }
-    synchronized void touch(){handler.removeCallbacks(saver);handler.postDelayed(saver,650);changed.run();}
+    private void scheduleSave(){
+        if(disk.isShutdown())return;
+        if(pendingSave!=null)pendingSave.cancel(false);
+        pendingSave=disk.schedule(()->{try{flush();}catch(Exception e){saveFailed.accept(e);}},650,TimeUnit.MILLISECONDS);
+    }
+    synchronized void close(){disk.shutdownNow();flush();}
+    private void changedState(){uiDirty=true;visibleDeltas.clear();changed.run();}
+    synchronized void touch(){scheduleSave();changedState();}
     synchronized JSONObject snapshot(){
         JSONObject out=Json.copy(data);JSONArray hs=out.optJSONArray("hosts");
         for(int i=0;i<hs.length();i++){
@@ -67,6 +79,56 @@ final class Store {
     }
     synchronized JSONObject host(String id){return find(data.optJSONArray("hosts"),id);}
     synchronized JSONObject chat(String id){return find(data.optJSONArray("chats"),id);}
+    synchronized JSONObject chatForRemote(String hostId,String remoteId){
+        if(remoteId.isEmpty())return null;
+        JSONArray chats=data.optJSONArray("chats");
+        for(int i=0;i<chats.length();i++){
+            JSONObject chat=chats.optJSONObject(i);
+            if(hostId.equals(chat.optString("hostId"))&&remoteId.equals(chat.optString("remoteId")))return chat;
+        }
+        return null;
+    }
+    synchronized void showChat(String id){visibleChatId=id;uiDirty=true;visibleDeltas.clear();}
+    synchronized JSONObject uiUpdate(boolean force){
+        if(force||uiDirty){
+            JSONObject state=uiState(true);
+            uiDirty=false;visibleDeltas.clear();
+            return Json.obj("type","state","state",state);
+        }
+        if(visibleDeltas.isEmpty())return null;
+        JSONArray deltas=new JSONArray();
+        visibleDeltas.forEach((id,text)->deltas.put(Json.obj("id",id,"text",text.toString())));
+        visibleDeltas.clear();
+        return Json.obj("type","messageDeltas","chatId",visibleChatId,"deltas",deltas);
+    }
+    synchronized JSONObject uiState(boolean includeMessages){
+        JSONArray hosts=new JSONArray(),chats=new JSONArray();
+        JSONArray sourceHosts=data.optJSONArray("hosts"),sourceChats=data.optJSONArray("chats");
+        for(int i=0;i<sourceHosts.length();i++){
+            JSONObject host=sourceHosts.optJSONObject(i);
+            JSONObject safe=fieldsExcept(host,Set.of("password","privateKey","passphrase"));
+            putValue(safe,"hasSecret",!host.optString("password").isEmpty()||!host.optString("privateKey").isEmpty());
+            hosts.put(safe);
+        }
+        for(int i=0;i<sourceChats.length();i++){
+            JSONObject chat=sourceChats.optJSONObject(i);
+            JSONObject copy=fieldsExcept(chat,Set.of("messages"));
+            if(includeMessages&&visibleChatId.equals(chat.optString("id"))){
+                JSONArray messages=chat.optJSONArray("messages");
+                try{putValue(copy,"messages",messages==null?new JSONArray():new JSONArray(messages.toString()));}
+                catch(JSONException e){throw new IllegalStateException(e);}
+            }
+            chats.put(copy);
+        }
+        return Json.obj("hosts",hosts,"chats",chats,"theme",data.optString("theme","dark"),
+                "approvalMode",data.optString("approvalMode","on-request"),"visibleChatId",visibleChatId);
+    }
+    private static JSONObject fieldsExcept(JSONObject source,Set<String> excluded){
+        JSONObject copy=new JSONObject();
+        for(Iterator<String> keys=source.keys();keys.hasNext();){String name=keys.next();if(!excluded.contains(name))putValue(copy,name,source.opt(name));}
+        return copy;
+    }
+    private static void putValue(JSONObject o,String k,Object v){try{o.put(k,v);}catch(JSONException e){throw new IllegalStateException(e);}}
     static JSONObject find(JSONArray arr,String id){for(int i=0;i<arr.length();i++){JSONObject o=arr.optJSONObject(i);if(o.optString("id").equals(id))return o;}return null;}
     synchronized JSONObject prepareHost(JSONObject input)throws Exception{
         String id=input.optString("id",UUID.randomUUID().toString());JSONObject old=host(id);
@@ -90,7 +152,7 @@ final class Store {
     }
     synchronized JSONObject saveHost(JSONObject input)throws Exception{
         JSONObject h=prepareHost(input);String id=h.getString("id");h.put("keepConnected",false);
-        JSONArray hs=data.getJSONArray("hosts");remove(hs,id);hs.put(h);flush();changed.run();return h;
+        JSONArray hs=data.getJSONArray("hosts");remove(hs,id);hs.put(h);flush();changedState();return h;
     }
     synchronized void keepConnected(String id,boolean value){JSONObject h=host(id);if(h!=null&&h.optBoolean("keepConnected")!=value){put(h,"keepConnected",value);flush();}}
     synchronized Set<String> wantedConnections(){Set<String> ids=new HashSet<>();JSONArray hs=data.optJSONArray("hosts");for(int i=0;i<hs.length();i++){JSONObject h=hs.optJSONObject(i);if(h.optBoolean("keepConnected"))ids.add(h.optString("id"));}return ids;
@@ -108,19 +170,38 @@ final class Store {
         touch();return m;
     }
     synchronized void append(JSONObject chat,String id,String role,String kind,String delta){
-        JSONObject m=find(chat.optJSONArray("messages"),id);message(chat,id,role,kind,(m==null?"":m.optString("text"))+delta);
+        if(delta.isEmpty())return;
+        JSONObject m=find(chat.optJSONArray("messages"),id);
+        if(m==null){message(chat,id,role,kind,delta);return;}
+        putValue(m,"text",m.optString("text")+delta);
+        scheduleSave();
+        if(visibleChatId.equals(chat.optString("id"))){
+            if(!uiDirty)visibleDeltas.computeIfAbsent(id,key->new StringBuilder()).append(delta);
+            changed.run();
+        }
     }
-    synchronized void deleteChat(String id){remove(data.optJSONArray("chats"),id);flush();changed.run();}
+    synchronized void deleteChat(String id){remove(data.optJSONArray("chats"),id);flush();changedState();}
     synchronized void deleteHost(String id){
         remove(data.optJSONArray("hosts"),id);JSONArray cs=data.optJSONArray("chats");
         for(int i=cs.length()-1;i>=0;i--)if(cs.optJSONObject(i).optString("hostId").equals(id))cs.remove(i);
-        flush();changed.run();
+        flush();changedState();
     }
     synchronized void historyStale(String hostId){try{if(HistoryRefresh.invalidate(data.getJSONArray("chats"),hostId))touch();}catch(JSONException e){throw new IllegalStateException(e);}}
     synchronized void theme(String v){if(!v.equals("dark")&&!v.equals("light"))return;put(data,"theme",v);}
     synchronized String approvalMode(JSONObject chat){return ApprovalMode.require(chat.optString("approvalMode",data.optString("approvalMode","on-request")));}
     synchronized void approvalMode(String chatId,String mode){
-        ApprovalMode.require(mode);JSONObject chat=chat(chatId);put(data,"approvalMode",mode);if(chat!=null)put(chat,"approvalMode",mode);flush();
+        ApprovalMode.require(mode);
+        JSONObject chat=chat(chatId);
+        if(!chatId.isEmpty()&&chat==null)throw new IllegalArgumentException("聊天不存在");
+        Object previousDefault=data.opt("approvalMode"),previousChat=chat==null?null:chat.opt("approvalMode");
+        putValue(data,"approvalMode",mode);
+        if(chat!=null)putValue(chat,"approvalMode",mode);
+        try{flush();}catch(RuntimeException e){
+            putValue(data,"approvalMode",previousDefault);
+            if(chat!=null)putValue(chat,"approvalMode",previousChat);
+            throw e;
+        }
+        changedState();
     }
     static void remove(JSONArray arr,String id){for(int i=arr.length()-1;i>=0;i--)if(arr.optJSONObject(i).optString("id").equals(id))arr.remove(i);}
 }

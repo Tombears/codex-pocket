@@ -25,6 +25,18 @@ public class UpgradeAndSshTest {
             JSONObject fixture;try(var in=instrumentation.getContext().getAssets().open("ssh-fixture.json")){var bytes=new java.io.ByteArrayOutputStream();byte[] buffer=new byte[4096];int count;while((count=in.read(buffer))!=-1)bytes.write(buffer,0,count);fixture=new JSONObject(bytes.toString("UTF-8"));}
             JSONObject sshHost=store.saveHost(Json.obj("id","ssh-fixture","name","localhost fixture","host","10.0.2.2","port",2222,"user","fixture","auth","key","privateKey",fixture.getString("clientKey"),"cwd","","codex",""));
             store.put(sshHost,"fingerprint",fixture.getString("fingerprint"));store.flush();
+            JSONObject hidden=store.newChat("upgrade-host","");
+            store.message(hidden,"hidden-message","assistant","text","hidden history");
+            store.showChat(chat.getString("id"));
+            JSONObject initial=store.uiUpdate(false).getJSONObject("state");
+            assertFalse(Store.find(initial.getJSONArray("chats"),hidden.getString("id")).has("messages"));
+            assertFalse(Store.find(initial.getJSONArray("hosts"),"ssh-fixture").has("privateKey"));
+            store.append(chat,"upgrade-message","user","text"," appended");
+            JSONObject delta=store.uiUpdate(false);
+            assertEquals("messageDeltas",delta.getString("type"));
+            assertEquals(" appended",delta.getJSONArray("deltas").getJSONObject(0).getString("text"));
+            assertEquals("upgrade history preserved",Store.find(Store.find(initial.getJSONArray("chats"),chat.getString("id")).getJSONArray("messages"),"upgrade-message").getString("text"));
+            store.deleteChat(hidden.getString("id"));
             Activity activity=instrumentation.startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             CountDownLatch ready=new CountDownLatch(1);CodexService[] owner=new CodexService[1];
             ServiceConnection binding=new ServiceConnection(){public void onServiceConnected(ComponentName n,IBinder b){owner[0]=((CodexService.LocalBinder)b).service();ready.countDown();}public void onServiceDisconnected(ComponentName n){}};
@@ -49,6 +61,10 @@ public class UpgradeAndSshTest {
                 String sentUrl=batch.input().getJSONObject(0).getString("url");byte[] sentBytes=android.util.Base64.decode(sentUrl.substring(sentUrl.indexOf(',')+1),android.util.Base64.NO_WRAP);assertEquals("Declared JPEG must contain JPEG bytes",255,sentBytes[0]&255);assertEquals(216,sentBytes[1]&255);
                 JSONObject interrupted=owner[0].store.newChat("ssh-fixture","");owner[0].store.approvalMode(interrupted.getString("id"),"untrusted");assertEquals("untrusted",owner[0].store.approvalMode(interrupted));
                 kept.send(interrupted.getString("id"),"",batch);assertEquals("图片对话",interrupted.getString("title"));kept.steer(interrupted.getString("id"),"focus on the blue area",batch);assertEquals(2,interrupted.getJSONArray("messages").length());assertTrue(interrupted.getJSONArray("messages").getJSONObject(1).getBoolean("steering"));
+                kept.steer(interrupted.getString("id"),"request fixture permission",batch);
+                await(()->permissionToken(owner[0].store,interrupted)!=null,5000);
+                kept.approve(permissionToken(owner[0].store,interrupted),"accept",null);
+                await(()->{synchronized(owner[0].store){return Store.find(interrupted.optJSONArray("messages"),"fixture-permission-result")!=null;}},5000);
                 byte[] remoteBytes=kept.readImage("/home/fixture/output/cat.png");JSONObject remotePreview=media.add(remoteBytes);assertTrue(remotePreview.getString("preview").startsWith("data:image/png;base64,"));
                 assertArrayEquals("Original cache must retain every source byte",remoteBytes,media.original(remotePreview.getString("id")).bytes());
                 java.io.File exported=new java.io.File(context.getCacheDir(),"saved-original.png");CountDownLatch savedImage=new CountDownLatch(1);CodexService.Listener saveListener=e->{if(e.optString("type").equals("toast")&&e.optString("message").equals("原图已保存"))savedImage.countDown();};owner[0].listen(saveListener);
@@ -81,6 +97,16 @@ public class UpgradeAndSshTest {
             var values=new ContentValues();values.put("ts",System.currentTimeMillis()-LogPolicy.MAX_AGE_MS-1000);values.put("message","expired-log-entry");log.getWritableDatabase().insert("events",null,values);
             log.record("INFO","test","current-log-entry password=must-not-leak");String exported=log.exportText();assertFalse(exported.contains("expired-log-entry"));assertFalse(exported.contains("must-not-leak"));assertTrue(exported.contains("current-log-entry"));
         }finally{log.close();}
+    }
+    private static String permissionToken(Store store,JSONObject chat){
+        synchronized(store){
+            JSONArray messages=chat.optJSONArray("messages");
+            for(int i=0;i<messages.length();i++){
+                JSONObject message=messages.optJSONObject(i);
+                if("item/permissions/requestApproval".equals(message.optString("approvalType")))return message.optString("id");
+            }
+            return null;
+        }
     }
     private static void await(java.util.function.BooleanSupplier condition,long timeout)throws Exception{long deadline=SystemClock.elapsedRealtime()+timeout;while(!condition.getAsBoolean()&&SystemClock.elapsedRealtime()<deadline)Thread.sleep(100);assertTrue("Condition timed out",condition.getAsBoolean());}
 }

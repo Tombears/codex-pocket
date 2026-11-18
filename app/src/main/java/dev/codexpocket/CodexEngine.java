@@ -126,8 +126,9 @@ final class CodexEngine {
             InputStream stdout=channel.getInputStream();OutputStream stdin=channel.getOutputStream();
             channel.setErrStream(stderr);
             channel.connect(30000);requireActive(attempt);phase(attempt,"等待 Codex 握手");
-            rpc=new Rpc(stdout,stdin,this::onEvent,e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
-            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.4.2")),30);
+            rpc=new Rpc(stdout,stdin,event->{if(!closing&&connection.current(token))onEvent(event);},
+                    e->{if(!closing&&connection.current(token)){fail(e);cleanupTransport();}});
+            rpc.request("initialize",Json.obj("clientInfo",Json.obj("name","codex_pocket","title","Codex Pocket","version","0.4.3")),30);
             requireActive(attempt);
             rpc.send(Json.obj("method","initialized","params",new JSONObject()));
             for(String line:stderr.text().split("\n")){
@@ -158,11 +159,13 @@ final class CodexEngine {
     synchronized void send(String chatId,String text,Attachments.Batch images)throws Exception{
         if(!busyChat.isEmpty())throw new IOException("这台虚拟机已有任务运行，请先等待或停止");
         connect();JSONObject chat=store.chat(chatId);if(chat==null||!chat.optString("hostId").equals(hostId))throw new IOException("聊天与虚拟机不匹配");
-        busyChat=chatId;turnId="";store.put(chat,"status","working");
+        String approvalMode=store.approvalMode(chat);
+        busyChat=chatId;turnId="";
+        store.put(chat,"activeApprovalMode",approvalMode);
+        store.put(chat,"status","working");
         try{
             String remote=chat.optString("remoteId");
             JSONObject h=store.host(hostId);
-            String approvalMode=store.approvalMode(chat);
             JSONObject params=Json.obj("approvalPolicy",approvalMode,"approvalsReviewer","user","sandbox","workspace-write");
             if(!chat.optString("cwd").isBlank())params.put("cwd",chat.optString("cwd"));
             if(!remote.isEmpty())params.put("threadId",remote);
@@ -182,7 +185,7 @@ final class CodexEngine {
             JSONObject r=rpc.request("turn/start",turnParams);
             // A very short turn can complete before the request response is read.
             if(busyChat.equals(chatId))turnId=r.optJSONObject("turn").optString("id");
-        }catch(Exception e){store.put(chat,"status","error");store.message(chat,"err-"+UUID.randomUUID(),"system","error",errorMessage(e));busyChat="";turnId="";throw e;}
+        }catch(Exception e){store.put(chat,"status","error");store.put(chat,"activeApprovalMode",null);store.message(chat,"err-"+UUID.randomUUID(),"system","error",errorMessage(e));busyChat="";turnId="";throw e;}
     }
     static JSONArray userInput(String text,Attachments.Batch images){JSONArray input=new JSONArray();if(!text.isEmpty())input.put(Json.obj("type","text","text",text));for(int i=0;i<images.input().length();i++)input.put(images.input().optJSONObject(i));return input;}
     synchronized void steer(String chatId,String text,Attachments.Batch images)throws Exception{
@@ -196,16 +199,15 @@ final class CodexEngine {
         JSONObject c=store.chat(chatId);rpc.request("turn/interrupt",Json.obj("threadId",c.optString("remoteId"),"turnId",turnId));
     }
     private JSONObject chatFor(String remote){
-        JSONObject snapshot=store.snapshot();JSONArray chats=snapshot.optJSONArray("chats");
-        for(int i=0;i<chats.length();i++){JSONObject c=chats.optJSONObject(i);if(c.optString("hostId").equals(hostId)&&c.optString("remoteId").equals(remote))return store.chat(c.optString("id"));}
-        return null;
+        return store.chatForRemote(hostId,remote);
     }
     private void onEvent(JSONObject event){
         try{
             String method=event.optString("method");JSONObject p=event.optJSONObject("params");if(p==null)p=new JSONObject();
             JSONObject c=chatFor(p.optString("threadId"));
             if(event.has("id")){
-                if(c!=null&&(method.equals("item/commandExecution/requestApproval")||method.equals("item/fileChange/requestApproval")||method.equals("item/tool/requestUserInput"))){
+                if(c!=null&&(method.equals("item/commandExecution/requestApproval")||method.equals("item/fileChange/requestApproval")||method.equals("item/tool/requestUserInput")
+                        ||(method.equals("item/permissions/requestApproval")&&p.optJSONObject("permissions")!=null))){
                     String token=UUID.randomUUID().toString();approvals.put(token,new Pending(event.get("id"),method,p,c.optString("id")));
                     JSONObject m=store.message(c,token,"system","approval",p.optString("command",p.optString("reason","Codex 需要你的确认")));
                     store.put(m,"approvalType",method);store.put(m,"params",p);owner.notifyAttention();
@@ -228,7 +230,7 @@ final class CodexEngine {
                 JSONObject item=p.optJSONObject("item");if(item!=null)recordItem(c,item,method.endsWith("completed"));
             }else if(method.equals("turn/completed")){
                 JSONObject t=p.optJSONObject("turn");String status=t==null?"completed":t.optString("status","completed");
-                store.put(c,"status",status);store.put(c,"updatedAt",System.currentTimeMillis());
+                store.put(c,"status",status);store.put(c,"activeApprovalMode",null);store.put(c,"updatedAt",System.currentTimeMillis());
                 if(t!=null&&!t.isNull("error"))store.message(c,"err-"+UUID.randomUUID(),"system","error",t.optJSONObject("error").optString("message","Codex 执行失败"));
                 resolveAll(c.optString("id"));if(busyChat.equals(c.optString("id"))){busyChat="";turnId="";}owner.update();
             }else if(method.equals("error"))store.message(c,"err-"+UUID.randomUUID(),"system","error",p.optJSONObject("error")==null?p.toString():p.optJSONObject("error").optString("message"));
@@ -298,14 +300,25 @@ final class CodexEngine {
         }finally{sftp.disconnect();}
     }
     void approve(String token,String decision,JSONObject answers)throws Exception{
-        Pending p=approvals.get(token);if(p==null||rpc==null)throw new IOException("该请求已结束或连接已断开");
+        Rpc transport=rpc;
+        Pending p=approvals.get(token);if(p==null||transport==null)throw new IOException("该请求已结束或连接已断开");
         JSONObject c=store.chat(p.chatId);if(c==null||!c.optString("remoteId").equals(p.params.optString("threadId")))throw new IOException("审批会话不匹配");
         JSONObject result;
         if(p.method.equals("item/tool/requestUserInput"))result=Json.obj("answers",answers==null?new JSONObject():answers);
-        else {if(!Set.of("accept","decline").contains(decision))throw new IOException("无效审批决定");result=Json.obj("decision",decision);}
-        rpc.send(Json.obj("id",p.id,"result",result));resolveLocal(token,decision.equals("accept")?"已允许":"已回应");
+        else {
+            if(!Set.of("accept","decline").contains(decision))throw new IOException("无效审批决定");
+            result=p.method.equals("item/permissions/requestApproval")
+                    ?Json.obj("permissions",decision.equals("accept")?p.params.getJSONObject("permissions"):new JSONObject(),"scope","turn")
+                    :Json.obj("decision",decision);
+        }
+        if(transport!=rpc||!approvals.remove(token,p))throw new IOException("该请求已结束或连接已断开");
+        try{
+            transport.send(Json.obj("id",p.id,"result",result));
+            resolveLocal(token,p,decision.equals("accept")?"已允许":decision.equals("decline")?"已拒绝":"已回应");
+        }catch(IOException e){resolveLocal(token,p,"审批回复发送失败");throw e;}
     }
-    private void resolveLocal(String token,String label){Pending p=approvals.remove(token);if(p==null)return;JSONObject c=store.chat(p.chatId);if(c==null)return;JSONObject m=Store.find(c.optJSONArray("messages"),token);if(m!=null){store.put(m,"resolved",true);store.put(m,"resolution",label);}}
+    private void resolveLocal(String token,String label){Pending p=approvals.remove(token);if(p!=null)resolveLocal(token,p,label);}
+    private void resolveLocal(String token,Pending p,String label){JSONObject c=store.chat(p.chatId);if(c==null)return;JSONObject m=Store.find(c.optJSONArray("messages"),token);if(m!=null){store.put(m,"resolved",true);store.put(m,"resolution",label);}}
     private void resolveAll(String chatId){for(var e:approvals.entrySet())if(chatId==null||e.getValue().chatId.equals(chatId))resolveLocal(e.getKey(),"请求已结束");}
     synchronized void syncHistory()throws Exception{
         connect();String cursor=null;int count=0;
@@ -369,6 +382,6 @@ final class CodexEngine {
         closing=true;CompletableFuture<Boolean> f=trust;if(f!=null)f.complete(false);trust=null;
         Rpc r=rpc;rpc=null;if(r!=null)r.close();Socket socket=pendingSocket;pendingSocket=null;if(socket!=null)try{socket.close();}catch(IOException ignored){}if(channel!=null)channel.disconnect();if(ssh!=null)ssh.disconnect();channel=null;ssh=null;loaded.clear();
         String id=busyChat;busyChat="";turnId="";resolveAll(null);
-        if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null&&c.optString("status").equals("working"))store.put(c,"status","interrupted");}
+        if(!id.isEmpty()){JSONObject c=store.chat(id);if(c!=null){if(c.optString("status").equals("working"))store.put(c,"status","interrupted");store.put(c,"activeApprovalMode",null);}}
     }
 }

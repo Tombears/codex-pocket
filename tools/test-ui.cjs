@@ -123,7 +123,8 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  // Approval selection is scoped to the chat and displayed again from native state.
  await page.locator('#mode-label').click();assert.ok((await page.locator('#dialog').innerText()).includes('下一次任务'));
  await page.locator('[data-action=setApprovalMode][data-value=untrusted]').click();await page.waitForFunction(()=>document.querySelector('#mode-label').textContent.includes('严格审批'));
- assert.deepEqual(await page.evaluate(()=>window.commands.at(-1)),{type:'approvalMode',chatId:'cnew',value:'untrusted'});
+ const selection=await page.evaluate(()=>window.commands.at(-1));
+ assert.deepEqual(selection,{type:'approvalMode',chatId:'cnew',value:'untrusted',requestId:selection.requestId});assert.ok(selection.requestId);
  await page.locator('#mode-label').click();await page.locator('[data-action=setApprovalMode][data-value=never]').click();await page.waitForFunction(()=>document.querySelector('#mode-label').textContent.includes('不询问'));
  await page.locator('#mode-label').click();await page.locator('[data-action=setApprovalMode][data-value=on-request]').click();await page.waitForFunction(()=>document.querySelector('#mode-label').textContent.includes('按需审批'));
  // A long multiline command stays one row while its full content remains expandable.
@@ -184,6 +185,43 @@ const server=http.createServer((req,res)=>{const name=req.url==='/'?'index.html'
  await page.evaluate(()=>{window.fixture.connections.h2.busyChat='';window.receive({type:'state',state:window.fixture});});assert.equal(await page.evaluate(()=>window.commands.filter(a=>a.type==='loadHistory').length===window.historyCommandCount+1),true);
  assert.equal(await page.evaluate(()=>window.commands.filter(a=>a.type==='send'||a.type==='steer').length),priorTasks,'reconnect never resends tasks');
  assert.deepEqual(errors,[],'no browser JS errors');
- fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation','connecting stage and cancellation','persistent connection errors','root default directory','removed welcome footer','log export action','invalid IPv4 validation','test unsaved connection settings','restore editor after fingerprint trust','cancel isolated connection test','GFM tables lists and code copy','background permission settings','image-only sending and draft recovery','steer active turn without starting another','separate stop action','approval mode selection and native state restoration','single-line long command across 360/412/768px with full expansion','received PNG preview, full view, retry and external URL rejection','remote file link download and upload context','long stream preserves message nodes','completed history produces no DOM mutations','uploaded file draft stays scoped to its chat','stable Markdown blocks skip parsing and highlighting','text deltas appendData only','reference links and incomplete Markdown reconcile','open code fence highlights on close','history replacement clears stale blocks','disconnected chat reconnect control','automatic history refresh deduplicates each connection','failed history retains messages and retries','reconnect preserves drafts and never resends tasks','busy turns defer history refresh'],errors},null,2));
+ // Native frames keep other chat histories out of the WebView. Deltas respect the visible chat and a later authoritative state.
+ await page.reload();
+ await page.evaluate(()=>{
+   const s=window.fixture,c=s.chats.find(c=>c.id==='c1');
+   s.visibleChatId=c.id;s.connections={h1:{status:'online',busyChat:c.id}};
+   c.status='working';c.activeApprovalMode='never';c.approvalMode='never';
+   c.messages=[
+     {id:'streamed',role:'assistant',text:'**文本**'},
+     {id:'permissions',role:'system',kind:'approval',approvalType:'item/permissions/requestApproval',params:{permissions:{network:{enabled:true}}}}
+   ];
+   for(const other of s.chats)if(other!==c)delete other.messages;
+   window.receive({type:'state',state:structuredClone(s)});
+   window.originalMessage=document.querySelector('[data-message="streamed"]');
+   window.receive({type:'messageDeltas',chatId:c.id,deltas:[{id:'streamed',text:' 增量'}]});
+   window.receive({type:'messageDeltas',chatId:'c2',deltas:[{id:'streamed',text:' 其他聊天'}]});
+ });
+ assert.equal(await page.locator('[data-message="streamed"] .markdown-body').innerText(),'文本 增量');
+ assert.equal(await page.evaluate(()=>window.originalMessage===document.querySelector('[data-message="streamed"]')),true);
+ await page.evaluate(()=>window.receive({type:'state',state:structuredClone(window.fixture)}));
+ assert.equal(await page.locator('[data-message="streamed"] .markdown-body').innerText(),'文本');
+ await page.evaluate(()=>{
+   const s=window.fixture,c=s.chats.find(c=>c.id==='c1');
+   const tail='\n\n'+('长文本 '.repeat(9000))+'\n\n**完成标记**';
+   window.receive({type:'messageDeltas',chatId:c.id,deltas:[{id:'streamed',text:tail}]});
+   c.messages[0].text+=tail;
+ });
+ assert.ok((await page.locator('.stream-tail').textContent()).endsWith('**完成标记**'));
+ await page.evaluate(()=>window.receive({type:'state',state:structuredClone(window.fixture)}));
+ assert.equal(await page.locator('.stream-tail').count(),0);
+ assert.deepEqual(await page.locator('[data-message="streamed"] strong').allTextContents(),['文本','完成标记']);
+ await page.getByRole('button',{name:'仅允许本轮'}).click();
+ assert.deepEqual(await page.evaluate(()=>window.commands.at(-1)),{type:'approve',hostId:'h1',token:'permissions',decision:'accept'});
+ await page.locator('#mode-label').click();
+ assert.ok((await page.locator('.dialog-description').innerText()).includes('当前任务使用「不询问」'));
+ await page.locator('[data-action=setApprovalMode][data-value=on-request]').click();
+ await page.waitForFunction(()=>document.querySelector('#mode-label').textContent.includes('下轮按需审批'));
+ assert.equal(errors.length,0,errors.join('\n'));
+ fs.writeFileSync(path.join(out,'ui-test-result.json'),JSON.stringify({passed:true,checks:['mobile layout 412/360px','server grouping','history search','new chat selects correct VM and cwd','send targets correct chat','safe markdown','approval scoped to host','theme switching','credential form','absolute path validation','host trust cancellation','connecting stage and cancellation','persistent connection errors','root default directory','removed welcome footer','log export action','invalid IPv4 validation','test unsaved connection settings','restore editor after fingerprint trust','cancel isolated connection test','GFM tables lists and code copy','background permission settings','image-only sending and draft recovery','steer active turn without starting another','separate stop action','approval mode selection and native state restoration','single-line long command across 360/412/768px with full expansion','received PNG preview, full view, retry and external URL rejection','remote file link download and upload context','long stream preserves message nodes','completed history produces no DOM mutations','uploaded file draft stays scoped to its chat','stable Markdown blocks skip parsing and highlighting','text deltas appendData only','reference links and incomplete Markdown reconcile','open code fence highlights on close','history replacement clears stale blocks','disconnected chat reconnect control','automatic history refresh deduplicates each connection','failed history retains messages and retries','reconnect preserves drafts and never resends tasks','busy turns defer history refresh','native message delta scoping and snapshot recovery','turn-scoped permission dialog and next-turn approval mode'],errors},null,2));
  console.log('UI checks passed: original 25 workflows plus approval modes, single-line commands, received images, file transfers and long-stream DOM stability.');await browser.close();server.close();
 })().catch(e=>{console.error(e);server.close();process.exit(1);});

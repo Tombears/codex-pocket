@@ -44,9 +44,14 @@ def serve(path):
             transport.start_server(server=server);channel=transport.accept(30)
             if channel is None or not server.ready.wait(30):return
             channel.send_stderr(b'__CP_CWD__=/home/fixture\n__CP_BIN__=/usr/local/bin/codex\n')
+            def send(message):channel.sendall((json.dumps(message)+'\n').encode())
             for raw in channel.makefile('rb'):
                 event=json.loads(raw.decode());method=event.get('method')
                 if 'id' not in event:continue
+                if method is None and event['id']=='fixture-network-permission':
+                    assert event['result']=={'permissions':{'network':{'enabled':True}},'scope':'turn'}
+                    send({'method':'item/agentMessage/delta','params':{'threadId':'fixture-thread','itemId':'fixture-permission-result','delta':'Validated turn permission'}})
+                    continue
                 result={'userAgent':'android-ssh-fixture','platformOs':'linux','platformFamily':'unix','codexHome':'/home/fixture/.codex'} if method=='initialize' else {}
                 if method in ('thread/start','thread/resume'):
                     assert event['params']['approvalPolicy'] in ('on-request','untrusted','never')
@@ -62,7 +67,11 @@ def serve(path):
                         if item['type']=='image':assert item['url'].startswith('data:image/jpeg;base64,') and base64.b64decode(item['url'].split(',',1)[1]).startswith(b'\xff\xd8')
                     result={'turn':{'id':'fixture-turn'}} if method=='turn/start' else {'turnId':'fixture-turn'}
                     print('Validated '+method+' input; image count='+str(sum(i['type']=='image' for i in params['input'])),flush=True)
-                channel.sendall((json.dumps({'id':event['id'],'result':result})+'\n').encode())
+                send({'id':event['id'],'result':result})
+                if method=='turn/steer' and any(item.get('text')=='request fixture permission' for item in params['input']):
+                    send({'id':'fixture-network-permission','method':'item/permissions/requestApproval','params':{
+                        'threadId':'fixture-thread','turnId':'fixture-turn','itemId':'fixture-permission-item',
+                        'reason':'Fixture request','permissions':{'network':{'enabled':True}}}})
         except Exception as e:print('Fixture transport closed: '+type(e).__name__,flush=True)
         finally:transport.close();sock.close()
     listener=socket.socket();listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);listener.bind(('0.0.0.0',2222));listener.listen(8)

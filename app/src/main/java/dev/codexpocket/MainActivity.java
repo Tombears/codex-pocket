@@ -15,6 +15,7 @@ public final class MainActivity extends Activity {
     private WebView web;
     private CodexService service;
     private boolean pageReady,bound;
+    private long lastRendererExit;
     private String imageDraftKey="";
     private String exportImageId="";
     private android.net.Uri pendingExportUri;
@@ -22,9 +23,12 @@ public final class MainActivity extends Activity {
     private JSONObject fileAction;
     private android.net.Uri pendingFileUri;
     private boolean fileUpload;
-    private final CodexService.Listener listener=this::deliver;
+    private final CodexService.Listener listener=new CodexService.Listener(){
+        @Override public void receive(JSONObject event){deliver(event);}
+        @Override public void receiveState(String script){evaluateInWebView(script);}
+    };
     private final ServiceConnection connection=new ServiceConnection(){
-        public void onServiceConnected(ComponentName name,IBinder binder){service=((CodexService.LocalBinder)binder).service();service.listen(listener);finishFileTransfer();if(pendingImages!=null){service.importImages(pendingImages,imageDraftKey);pendingImages=null;}if(pendingExportUri!=null){service.exportImage(pendingExportUri,exportImageId);pendingExportUri=null;exportImageId="";}if(pageReady)deliver(Json.obj("type","state","state",service.snapshot()));}
+        public void onServiceConnected(ComponentName name,IBinder binder){service=((CodexService.LocalBinder)binder).service();service.listen(listener);finishFileTransfer();if(pendingImages!=null){service.importImages(pendingImages,imageDraftKey);pendingImages=null;}if(pendingExportUri!=null){service.exportImage(pendingExportUri,exportImageId);pendingExportUri=null;exportImageId="";}}
         public void onServiceDisconnected(ComponentName name){service=null;}
     };
     @Override public void onCreate(Bundle saved){
@@ -34,6 +38,9 @@ public final class MainActivity extends Activity {
         if(saved!=null){exportImageId=saved.getString("exportImageId","");String pending=saved.getString("pendingExportUri","");if(!pending.isEmpty())pendingExportUri=android.net.Uri.parse(pending);}
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},4);
         Intent intent=new Intent(this,CodexService.class);startForegroundService(intent);bound=bindService(intent,connection,BIND_AUTO_CREATE);
+        createWebView();
+    }
+    private void createWebView(){
         web=new WebView(this);web.setBackgroundColor(0xff17181b);
         WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(false);s.setAllowFileAccess(false);s.setAllowContentAccess(false);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setSupportMultipleWindows(false);s.setJavaScriptCanOpenWindowsAutomatically(false);
         web.addJavascriptInterface(new Bridge(),"Android");
@@ -53,7 +60,28 @@ public final class MainActivity extends Activity {
                     res.setResponseHeaders(java.util.Map.of("Content-Security-Policy","default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'","X-Content-Type-Options","nosniff"));return res;
                 }catch(IOException e){return empty();}
             }
-            @Override public void onPageFinished(WebView v,String url){if(url.startsWith(ORIGIN)){pageReady=true;if(service!=null)deliver(Json.obj("type","state","state",service.snapshot()));}}
+            @Override public void onPageFinished(WebView v,String url){if(v==web&&url.startsWith(ORIGIN)){pageReady=true;if(service!=null)service.update();}}
+            @Override public boolean onRenderProcessGone(WebView v,RenderProcessGoneDetail detail){
+                if(v!=web)return true;
+                pageReady=false;
+                web=null;
+                if(v.getParent() instanceof ViewGroup parent)parent.removeView(v);
+                v.destroy();
+                String reason="crashed="+detail.didCrash()+" priority="+detail.rendererPriorityAtExit();
+                android.util.Log.w("CodexPocket","WebView renderer exited: "+reason);
+                if(service!=null)service.log("WARN","ui/renderer-exit",reason);
+                if(isFinishing()||isDestroyed())return true;
+                long now=SystemClock.elapsedRealtime();
+                boolean repeated=lastRendererExit!=0&&now-lastRendererExit<10000;
+                lastRendererExit=now;
+                if(repeated){
+                    android.widget.Button retry=new android.widget.Button(MainActivity.this);
+                    retry.setText("聊天界面渲染中断，点击重试");
+                    retry.setOnClickListener(button->createWebView());
+                    setContentView(retry);
+                }else getWindow().getDecorView().post(()->{if(web==null&&!isFinishing()&&!isDestroyed())createWebView();});
+                return true;
+            }
         });
         web.setWebChromeClient(new WebChromeClient());
         setContentView(web);web.loadUrl(ORIGIN);
@@ -64,12 +92,14 @@ public final class MainActivity extends Activity {
             if(!exportImageId.isEmpty())return;
             exportImageId=event.optString("id");try{Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType(event.optString("mime"));intent.putExtra(Intent.EXTRA_TITLE,event.optString("name","图片.png"));startActivityForResult(intent,22);}catch(Exception e){exportImageId="";deliver(Json.obj("type","toast","message","无法打开保存位置选择器"));}return;
         }
-        if(pageReady&&web!=null)web.evaluateJavascript("window.receive("+event.toString()+")",null);
+        evaluateInWebView("window.receive("+event+")");
     });}
+    private void evaluateInWebView(String script){if(pageReady&&web!=null)web.evaluateJavascript(script,null);}
     public final class Bridge {
         @JavascriptInterface public void action(String json){
             try{JSONObject a=new JSONObject(json);if(a.optString("type").equals("copy")){android.content.ClipboardManager c=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);c.setPrimaryClip(ClipData.newPlainText("Codex",a.optString("text")));return;}
                 if(a.optString("type").equals("pickFiles")||a.optString("type").equals("downloadFile")){runOnUiThread(()->pickFile(a));return;}
+                if(a.optString("type").equals("showChat")){if(service!=null)service.showChat(a.optString("chatId"));return;}
                 if(a.optString("type").equals("exportLogs")){runOnUiThread(()->{Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("text/plain");intent.putExtra(Intent.EXTRA_TITLE,"CodexPocket-log-"+new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",java.util.Locale.ROOT).format(new java.util.Date())+".txt");startActivityForResult(intent,20);});return;}
                 if(a.optString("type").equals("pickImages")){imageDraftKey=a.optString("draftKey");runOnUiThread(()->{Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("image/*");intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(intent,21);});return;}
                 if(a.optString("type").equals("backgroundSettings")){runOnUiThread(()->{try{Intent i=new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,android.net.Uri.parse("package:"+getPackageName()));startActivity(i);}catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.parse("package:"+getPackageName())));}});return;}
@@ -94,7 +124,7 @@ public final class MainActivity extends Activity {
     }
     private void finishFileTransfer(){if(service!=null&&pendingFileUri!=null&&fileAction!=null){service.transferFile(pendingFileUri,fileAction,fileUpload);pendingFileUri=null;fileAction=null;}}
     @Override public void onSaveInstanceState(Bundle out){if(fileAction!=null)out.putString("fileAction",fileAction.toString());out.putBoolean("fileUpload",fileUpload);if(pendingFileUri!=null)out.putString("pendingFileUri",pendingFileUri.toString());out.putString("imageDraftKey",imageDraftKey);out.putString("exportImageId",exportImageId);if(pendingExportUri!=null)out.putString("pendingExportUri",pendingExportUri.toString());super.onSaveInstanceState(out);}
-    @Override public void onBackPressed(){web.evaluateJavascript("window.back()",null);}
+    @Override public void onBackPressed(){if(pageReady&&web!=null)web.evaluateJavascript("window.back()",null);else super.onBackPressed();}
     @Override public void onResume(){super.onResume();if(service!=null)service.update();}
     @Override public void onDestroy(){pageReady=false;if(service!=null)service.unlisten(listener);if(bound)unbindService(connection);if(web!=null){web.removeJavascriptInterface("Android");web.destroy();web=null;}super.onDestroy();}
 }

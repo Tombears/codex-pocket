@@ -46,7 +46,7 @@
 
 ## 安装与使用
 
-支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK；0.4.2 为正式发布版，沿用固定签名，新增文件上传与链接下载、聊天增量渲染、断线重连入口和重连后的历史同步，保留原图查看和保存、服务器图片接收、单行命令卡片和可选审批模式，并保留设置内测试连接、Markdown、后台保活、自动重连、30 秒连接总超时和日志导出，同页提供 `SHA256SUMS.txt` 校验文件。
+支持 Android 8.0（API 26）及以上，需要较新的 Android System WebView。请前往 [**Releases**](https://github.com/Tombears/codex-pocket/releases) 下载 APK。0.4.3 沿用固定签名，优化长文本流式显示，支持 WebView 渲染中断后恢复，并改进手机端审批提示和额外权限审批。同页提供 `SHA256SUMS.txt` 校验文件。
 
 也可以自行构建，或在 [GitHub Actions](https://github.com/Tombears/codex-pocket/actions/workflows/android.yml) 成功构建页面的 Artifacts 下载 `codex-pocket-release`（固定签名包）。下载 Actions 构建产物可能需要登录 GitHub。
 
@@ -92,7 +92,7 @@ codex login --device-auth
 
 任务执行时仍可输入文字、添加图片并发送引导。引导使用当前 thread 和 expectedTurnId 调用 turn/steer，不新开任务；任务结束或断线时会报错并保留草稿，不自动转为新任务。停止任务使用单独的「停止」按钮。
 
-点击输入框旁的审批模式可选择「按需审批」（on-request）、「严格审批」（untrusted，除受信任操作外请求审批）或「不询问」（never，超出当前权限的操作会失败）。模式按聊天加密保存，新聊天沿用最近选择；任务执行中切换从下一次任务开始生效，发送引导不改变正在执行任务的策略。服务器托管策略仍可能拒绝某个模式。
+点击输入框旁的审批模式可选择「按需审批」（on-request）、「严格审批」（untrusted，除受信任操作外请求审批）或「不询问」（never，超出当前权限的操作会失败）。模式按聊天加密保存，新聊天沿用最近选择。任务执行中切换后，按钮会标明下一轮的模式，当前任务继续使用启动时的模式。服务器托管策略仍可能拒绝某个模式。
 
 ## 后台连接
 
@@ -112,7 +112,7 @@ codex login --device-auth
 - 服务器需已安装、登录 Codex。应用不会自行安装服务器软件或代替账号登录。
 - 同一服务器一次只运行一个由本应用发起的任务；可以同时连接多台服务器。外部终端或其他客户端的并行任务不受应用约束。
 - 默认使用 `on-request` 审批，支持切换为 `untrusted` 或 `never`；保留 `workspace-write` 沙箱和用户审批路由，遵循服务器托管策略。
-- 不支持的交互请求会被明确拒绝，并显示说明。首次支持命令/文件审批及 `item/tool/requestUserInput` 问题回答；复杂 MCP 表单和额外权限请求不提供授权界面。
+- 支持命令和文件变更审批、`item/tool/requestUserInput` 问题回答，以及服务器发起的 `item/permissions/requestApproval` 额外网络或文件权限审批。额外授权仅在当前轮内有效。复杂 MCP 表单会被拒绝并显示说明。
 - 应用使用前台服务、连接期间的部分唤醒锁和自动重连保持后台连接，连接期间会增加耗电。请在设置中允许后台运行；vivo 等设备还需允许自启动和后台高耗电。系统强制停止、厂商限制和无网络仍可能断开 SSH；恢复连接后不会自动重发任务。
 - 断连后聊天上下文可使用远程 thread ID 恢复；已执行的文件改动不会因为断连而撤销。继续操作前先刷新记录并核对服务器状态。
 - 首版无离线任务队列、自动重试、SFTP 文件浏览、跳板机、端口转发配置、跨手机历史同步或凭据导出。

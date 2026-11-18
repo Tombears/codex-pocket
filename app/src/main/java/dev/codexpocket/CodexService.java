@@ -13,7 +13,10 @@ import java.util.concurrent.*;
 
 public final class CodexService extends Service {
     final class LocalBinder extends Binder { CodexService service(){return CodexService.this;} }
-    interface Listener{void receive(JSONObject event);}
+    interface Listener{
+        void receive(JSONObject event);
+        default void receiveState(String script){}
+    }
     private final IBinder binder=new LocalBinder();
     final ConcurrentHashMap<String,CodexEngine> engines=new ConcurrentHashMap<>();
     final ConcurrentHashMap<String,JSONObject> trustPrompts=new ConcurrentHashMap<>();
@@ -30,6 +33,7 @@ public final class CodexService extends Service {
     };
     private final ExecutorService workers=Executors.newCachedThreadPool();
     private final ExecutorService imageWorkers=Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService uiWorker=Executors.newSingleThreadScheduledExecutor();
     private final Set<String> imageJobs=ConcurrentHashMap.newKeySet();
     private final Handler main=new Handler(Looper.getMainLooper());
     Store store;
@@ -81,6 +85,7 @@ public final class CodexService extends Service {
     String initError;
     private volatile Listener listener;
     private boolean updatePending;
+    private boolean refreshPending;
     @Override public void onCreate(){
         super.onCreate();
         NotificationManager manager=getSystemService(NotificationManager.class);
@@ -89,7 +94,12 @@ public final class CodexService extends Service {
         startForeground(1,notification("服务器连接将在后台保持",false));
         try{diagnostics=new DiagnosticLog(this);log("INFO","app","service started");}catch(Exception e){android.util.Log.w("CodexPocket","Diagnostics unavailable");}
         main.postDelayed(new Runnable(){public void run(){if(diagnostics!=null)try{diagnostics.prune();}catch(Exception ignored){}main.postDelayed(this,60*60*1000L);}},60*60*1000L);
-        try{store=new Store(this);store.changed=this::update;}catch(Exception e){initError="无法读取本地加密数据，请勿清除应用数据；先保留安装并检查系统密钥库。";}
+        try{
+            store=new Store(this);
+            store.changed=()->scheduleUpdate(false);
+            store.saveFailed=e->log("ERROR","store",e.getMessage());
+        }catch(Exception e){initError="无法读取本地加密数据，请勿清除应用数据；先保留安装并检查系统密钥库。";}
+        if(Build.VERSION.SDK_INT>=30)workers.submit(this::logLastExit);
         wakeLock=getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"CodexPocket:connections");wakeLock.setReferenceCounted(false);
         connectivity=getSystemService(ConnectivityManager.class);try{connectivity.registerDefaultNetworkCallback(networks);}catch(Exception e){log("WARN","network",e.getClass().getSimpleName());}
         main.post(new Runnable(){public void run(){if(destroyed)return;maintainConnections();main.postDelayed(this,5000);}});
@@ -100,6 +110,18 @@ public final class CodexService extends Service {
     }
     void notifyAttention(){getSystemService(NotificationManager.class).notify(2,notification("任务正在等待你的回应",true));}
     void log(String level,String tag,String message){if(diagnostics!=null)try{diagnostics.record(level,tag,message);}catch(Exception ignored){}}
+    @android.annotation.TargetApi(30)
+    private void logLastExit(){
+        try{
+            var exits=getSystemService(ActivityManager.class).getHistoricalProcessExitReasons(null,0,1);
+            if(!exits.isEmpty()){
+                ApplicationExitInfo exit=exits.get(0);
+                if(exit.getTimestamp()>=LogPolicy.cutoff(System.currentTimeMillis()))
+                    log("INFO","app/last-exit","time="+exit.getTimestamp()+" reason="+exit.getReason()+" status="+exit.getStatus()
+                            +" pssKiB="+exit.getPss()+" rssKiB="+exit.getRss());
+            }
+        }catch(RuntimeException ignored){}
+    }
     void exportLogs(Uri uri){workers.submit(()->{try{if(diagnostics==null)throw new java.io.IOException("日志暂不可用");try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选文件");out.write(diagnostics.exportText().getBytes(StandardCharsets.UTF_8));}event(Json.obj("type","toast","message","已导出最近 24 小时日志"));}catch(Exception e){event(Json.obj("type","toast","message","日志导出失败："+e.getMessage()));}});}
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_STICKY;}
     void connected(String id){synchronized(connectionControl){CodexEngine e=engines.get(id);if(!destroyed&&e!=null&&e.connection.snapshot().status().equals("online")){store.keepConnected(id,true);store.historyStale(id);reconnect.succeeded(id);}}}
@@ -133,13 +155,28 @@ public final class CodexService extends Service {
         if(e.optString("type").equals("trust"))trustPrompts.put(e.optString("hostId"),e);
         main.post(()->{Listener l=listener;if(l!=null)l.receive(e);});
     }
-    synchronized void update(){
-        if(updatePending)return;updatePending=true;
-        main.postDelayed(()->{synchronized(this){updatePending=false;}if(store!=null)event(Json.obj("type","state","state",snapshot()));},100);
+    void update(){scheduleUpdate(true);}
+    void showChat(String chatId){if(store!=null)store.showChat(chatId);scheduleUpdate(false);}
+    private synchronized void scheduleUpdate(boolean refresh){
+        if(destroyed||listener==null)return;
+        refreshPending|=refresh;
+        if(updatePending)return;
+        updatePending=true;
+        uiWorker.schedule(this::publishState,125,TimeUnit.MILLISECONDS);
     }
-    JSONObject snapshot(){
-        if(store==null)return Json.obj("error",initError);
-        JSONObject out=store.snapshot(),connections=new JSONObject();
+    private void publishState(){
+        boolean refresh;
+        synchronized(this){refresh=refreshPending;refreshPending=false;updatePending=false;}
+        Listener target=listener;
+        if(target==null||destroyed)return;
+        JSONObject frame=store==null?Json.obj("type","state","state",Json.obj("error",initError)):store.uiUpdate(refresh);
+        if(frame==null)return;
+        if(frame.optString("type").equals("state")&&store!=null)addConnectionState(frame.optJSONObject("state"));
+        String script="window.receive("+frame+")";
+        main.post(()->{if(listener==target&&!destroyed)target.receiveState(script);});
+    }
+    private JSONObject addConnectionState(JSONObject out){
+        JSONObject connections=new JSONObject();
         for(var e:engines.entrySet())try{ConnectionProgress.Snapshot progress=e.getValue().connection.snapshot();connections.put(e.getKey(),Json.obj("status",progress.status(),"phase",progress.phase(),"error",progress.error(),"cwd",e.getValue().runtimeCwd,"codex",e.getValue().runtimeCodex,"busyChat",e.getValue().busyChat));}catch(Exception ignored){}
         try{JSONObject progress=new JSONObject();for(var entry:tests.entrySet()){var s=entry.getValue().connection.snapshot();progress.put(entry.getKey(),Json.obj("phase",s.phase(),"status",s.status()));}out.put("connectionTests",progress);out.put("batteryUnrestricted",getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName()));out.put("connections",connections);out.put("trustPrompts",new JSONArray(trustPrompts.values()));}catch(Exception ignored){}return out;
     }
@@ -194,7 +231,7 @@ public final class CodexService extends Service {
                     }
                     case "newChat":{
                         JSONObject h=store.host(hostId);if(h==null)throw new Exception("请先添加虚拟机");String cwd=a.optString("cwd",h.optString("cwd"));Json.command(cwd,h.optString("codex","codex"));
-                        JSONObject c=store.newChat(hostId,cwd);event(Json.obj("type","chatCreated","chatId",c.optString("id"),"hostId",hostId,"state",snapshot()));break;
+                        JSONObject c=store.newChat(hostId,cwd);event(Json.obj("type","chatCreated","chatId",c.optString("id"),"hostId",hostId,"state",addConnectionState(store.uiState(false))));break;
                     }
                     case "deleteChat":{
                         JSONObject c=store.chat(chatId);if(c==null)break;CodexEngine e=engines.get(c.optString("hostId"));if(e!=null&&e.busyChat.equals(chatId))throw new Exception("任务运行中，请先停止再删除");store.deleteChat(chatId);break;
@@ -220,9 +257,9 @@ public final class CodexService extends Service {
                     case "disconnectAll":for(String id:store.wantedConnections())disconnect(id);for(CodexEngine e:engines.values())disconnect(e.hostId);cancelTests();trustPrompts.clear();break;
                     default:throw new IllegalArgumentException("未知操作");
                 }
-                event(Json.obj("type","actionComplete","action",type,"chatId",chatId,"hostId",hostId,"requestId",a.optString("requestId")));update();
-            }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"hostId",a.optString("hostId"),"requestId",a.optString("requestId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));update();}
+                event(Json.obj("type","actionComplete","action",type,"chatId",chatId,"hostId",hostId,"requestId",a.optString("requestId")));scheduleUpdate(false);
+            }catch(Exception|LinkageError e){log("ERROR","action/"+type,e.getClass().getSimpleName()+": "+e.getMessage());event(Json.obj("type","actionError","action",type,"chatId",a.optString("chatId"),"hostId",a.optString("hostId"),"requestId",a.optString("requestId"),"message",e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));scheduleUpdate(false);}
         });
     }
-    @Override public void onDestroy(){destroyed=true;main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();imageWorkers.shutdownNow();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)store.flush();workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
+    @Override public void onDestroy(){synchronized(this){destroyed=true;uiWorker.shutdownNow();}main.removeCallbacksAndMessages(null);if(connectivity!=null)try{connectivity.unregisterNetworkCallback(networks);}catch(Exception ignored){}cancelTests();for(CodexEngine e:engines.values())e.dispose();imageWorkers.shutdownNow();if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();if(store!=null)try{store.close();}catch(RuntimeException e){log("ERROR","store",e.getMessage());}workers.shutdownNow();log("INFO","app","service stopped");if(diagnostics!=null)diagnostics.close();super.onDestroy();}
 }

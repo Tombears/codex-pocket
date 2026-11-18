@@ -135,7 +135,9 @@ final class CodexEngine {
                 if(line.startsWith("__CP_CWD__="))runtimeCwd=line.substring(11);
                 if(line.startsWith("__CP_BIN__="))runtimeCodex=line.substring(11);
             }
-            if(!connection.online(attempt))throw new IOException("连接已取消或超时");owner.log("INFO","connection/"+hostId,"Codex handshake complete");if(overrideHost==null)owner.connected(hostId);owner.update();
+            boolean online=overrideHost==null?owner.connected(this,attempt):connection.online(attempt);
+            if(!online)throw new IOException("连接已取消或超时");
+            owner.log("INFO","connection/"+hostId,"Codex handshake complete");owner.update();
         }catch(Exception|LinkageError e){
             String label=connection.snapshot().phase();
             String message=(label.isEmpty()?"":label+"失败：")+errorMessage(e);

@@ -124,7 +124,17 @@ public final class CodexService extends Service {
     }
     void exportLogs(Uri uri){workers.submit(()->{try{if(diagnostics==null)throw new java.io.IOException("日志暂不可用");try(java.io.OutputStream out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new java.io.IOException("无法写入所选文件");out.write(diagnostics.exportText().getBytes(StandardCharsets.UTF_8));}event(Json.obj("type","toast","message","已导出最近 24 小时日志"));}catch(Exception e){event(Json.obj("type","toast","message","日志导出失败："+e.getMessage()));}});}
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_STICKY;}
-    void connected(String id){synchronized(connectionControl){CodexEngine e=engines.get(id);if(!destroyed&&e!=null&&e.connection.snapshot().status().equals("online")){store.keepConnected(id,true);store.historyStale(id);reconnect.succeeded(id);}}}
+    boolean connected(CodexEngine engine,long attempt){
+        synchronized(connectionControl){
+            if(destroyed||!engine.connection.active(attempt))return false;
+            String id=engine.hostId;
+            boolean managed=engines.get(id)==engine;
+            if(managed)store.historyStale(id);
+            if(!engine.connection.online(attempt))return false;
+            if(managed){store.keepConnected(id,true);reconnect.succeeded(id);}
+            return true;
+        }
+    }
     private void disconnect(String id){synchronized(connectionControl){store.keepConnected(id,false);reconnect.forget(id);CodexEngine e=engines.remove(id);if(e!=null)e.dispose();trustPrompts.remove(id);}}
     private void maintainConnections(){
         if(destroyed||store==null)return;Set<String> wanted=store.wantedConnections();
